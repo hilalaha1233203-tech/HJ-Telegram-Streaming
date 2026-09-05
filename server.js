@@ -222,68 +222,70 @@ async function streamAudio(req, res, targetMessage) {
         console.log(`📡 HTTP range: ${start} → ${end}`);
         console.log(`📦 HTTP bytes: ${contentLength}`);
 
-        const TELEGRAM_CHUNK_SIZE = 512 * 1024;
-        const ALIGN = 4096;
+        const ALIGN = 1048576; // 1MB alignment prevents LimitInvalidError
         let currentOffset = start;
         let remaining = contentLength;
         let totalSent = 0;
 
-        while (remaining > 0 && !res.destroyed) {
-            const alignedOffset = Math.floor(currentOffset / ALIGN) * ALIGN;
-            const skipBytes = currentOffset - alignedOffset;
-            const chunk1MB = 1048576;
-            const remainingInChunk = chunk1MB - (alignedOffset % chunk1MB);
+        const alignedOffset = Math.floor(currentOffset / ALIGN) * ALIGN;
+        const skipBytes = currentOffset - alignedOffset;
+        let skipRemaining = skipBytes;
 
-            let requestSize = TELEGRAM_CHUNK_SIZE;
-            while (requestSize > remainingInChunk && requestSize > ALIGN) {
-                requestSize /= 2;
-            }
+        console.log(`⬇️  TG stream starting: aligned=${alignedOffset} skip=${skipBytes} remaining=${remaining}`);
 
-            console.log(`⬇️  TG chunk: aligned=${alignedOffset} skip=${skipBytes} req=${requestSize}`);
+        let currentOffsetBefore, currentOffsetAfter, chunkReceived, remainingAfter, requestSize;
 
-            let chunkReceived = 0;
-            let skipRemaining = skipBytes;
+        for await (const chunk of client.iterDownload(targetMessage, { offset: alignedOffset })) {
+            if (res.destroyed) break;
+            let data = chunk;
+            
+            chunkReceived = data.length;
+            currentOffsetBefore = currentOffset;
+            requestSize = chunkReceived;
 
-            for await (const chunk of client.iterDownload(targetMessage, { offset: alignedOffset, requestSize: requestSize })) {
-                if (res.destroyed) break;
-                let data = chunk;
-                if (skipRemaining > 0) {
-                    if (data.length <= skipRemaining) {
-                        skipRemaining -= data.length;
-                        chunkReceived += data.length;
-                        continue;
-                    }
-                    data = data.subarray(skipRemaining);
-                    chunkReceived += skipRemaining;
-                    skipRemaining = 0;
+            if (skipRemaining > 0) {
+                if (data.length <= skipRemaining) {
+                    skipRemaining -= data.length;
+                    continue;
                 }
-                const allowed = Math.min(data.length, remaining);
-                const output = data.subarray(0, allowed);
-                if (output.length > 0) {
-                    res.write(output);
-                    totalSent += output.length;
-                    currentOffset += output.length;
-                    remaining -= output.length;
-                    chunkReceived += output.length;
-                }
-                if (chunkReceived >= requestSize) break;
-                if (remaining <= 0) break;
+                data = data.subarray(skipRemaining);
+                skipRemaining = 0;
             }
 
-            if (chunkReceived === 0) {
-                console.error("❌ Telegram returned 0 bytes.");
-                break;
-            }
+            const allowed = Math.min(data.length, remaining);
+            const output = data.subarray(0, allowed);
 
-            if (!res.destroyed && !res.writableNeedDrain) {
-                continue;
-            }
-            if (!res.destroyed && res.writableNeedDrain) {
-                await new Promise((resolve) => {
-                    res.once("drain", resolve);
+            if (output.length > 0) {
+                const writeOk = res.write(output);
+                totalSent += output.length;
+                currentOffset += output.length;
+                remaining -= output.length;
+
+                currentOffsetAfter = currentOffset;
+                remainingAfter = remaining;
+
+                console.log({
+                    currentOffsetBefore,
+                    alignedOffset,
+                    skipBytes,
+                    requestSize,
+                    chunkReceived,
+                    currentOffsetAfter,
+                    remainingAfter
                 });
+
+                if (!writeOk && !res.destroyed) {
+                    await new Promise((resolve) => res.once("drain", resolve));
+                }
             }
+            
+            if (remaining <= 0) break;
         }
+
+        if (remaining > 0 && !res.destroyed) {
+            console.error(`❌ Telegram stream ended early. Remaining: ${remaining} bytes`);
+        }
+
         console.log(`✅ Streamed ${totalSent} bytes`);
         if (!res.destroyed) {
             res.end();
