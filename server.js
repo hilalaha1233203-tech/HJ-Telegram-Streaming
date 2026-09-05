@@ -52,6 +52,10 @@ async function connectTelegram() {
     console.log("✅ Telegram session connected!");
 }
 
+app.get("/health", (req, res) => {
+    res.status(200).json({ status: "ok", service: "hj-telegram-streaming" });
+});
+
 app.get("/", (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -154,7 +158,6 @@ function setMediaHeaders(res, targetMessage) {
         res.setHeader('Content-Length', fileSize);
     }
 
-    // Playback only. There is intentionally no public download/attachment route.
     res.setHeader('Content-Disposition', 'inline; filename="' + safeName + '"');
 }
 
@@ -191,7 +194,6 @@ app.head('/video/message/:messageId', async (req, res) => {
 });
 
 // Deliberately no /download/message/:messageId route.
-// Users are allowed to stream media only through the playback endpoints.
 app.get('/audio/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
@@ -234,9 +236,6 @@ async function streamMedia(req, res, targetMessage) {
 
     try {
         const rangeHeader = req.headers.range;
-        console.log("\n🎧 MEDIA REQUEST");
-        console.log("Range:", rangeHeader || "none");
-
         let start = 0;
         let end = fileSize - 1;
 
@@ -273,17 +272,12 @@ async function streamMedia(req, res, targetMessage) {
         res.setHeader("Accept-Ranges", "bytes");
         res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
 
-        console.log(`📡 HTTP range: ${start} → ${end}`);
-        console.log(`📦 HTTP bytes: ${contentLength}`);
-
         const ALIGN = 1048576;
         const alignedOffset = Math.floor(start / ALIGN) * ALIGN;
         const skipBytes = start - alignedOffset;
         let skipRemaining = skipBytes;
         let remaining = contentLength;
         let totalSent = 0;
-
-        console.log(`⬇️ TG stream starting: aligned=${alignedOffset} skip=${skipBytes} remaining=${remaining}`);
 
         for await (const chunk of client.iterDownload(targetMessage, { offset: alignedOffset })) {
             if (res.destroyed) break;
