@@ -29,7 +29,6 @@ if (!process.env.CHANNEL_ID || isNaN(CHANNEL_ID)) {
 const SESSION_FILE = path.join(__dirname, "telegram-session.txt");
 const fileSession = fs.existsSync(SESSION_FILE) ? fs.readFileSync(SESSION_FILE, "utf8").trim() : "";
 const envSession = (process.env.TELEGRAM_SESSION || "").trim();
-
 const savedSession = envSession || fileSession;
 
 if (process.env.NODE_ENV === "production" && !envSession) {
@@ -80,10 +79,10 @@ app.options('/telegram/messages', (req, res) => {
 app.get('/telegram/messages', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization');
-    
+
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'Unauthorized: Missing Authorization header' });
-    
+
     try {
         const authResponse = await fetch('https://yajkfglagnyvenddyvok.supabase.co/auth/v1/user', {
             headers: {
@@ -91,25 +90,24 @@ app.get('/telegram/messages', async (req, res) => {
                 'apikey': 'sb_publishable_-cZxyr6HeB8H-dXNTUfNww_74XzTM6E'
             }
         });
-        
+
         if (!authResponse.ok) return res.status(401).json({ error: 'Invalid Supabase token' });
-        
+
         const user = await authResponse.json();
         if (user.email !== 'hilalaha1233203@gmail.com') {
             return res.status(403).json({ error: 'Forbidden: Admin access required' });
         }
-        
+
         const limit = Number(req.query.limit) || 100;
         const messages = await client.getMessages(CHANNEL_ID, { limit });
-        
+
         const audioMessages = [];
         for (const msg of messages) {
             if (msg.media && msg.media.document && msg.media.document.mimeType && msg.media.document.mimeType.startsWith('audio/')) {
                 const doc = msg.media.document;
-                
                 let fileName = 'audio.m4a';
                 let duration = 0;
-                
+
                 if (doc.attributes) {
                     for (const attr of doc.attributes) {
                         if (attr.className === 'DocumentAttributeFilename') {
@@ -120,7 +118,7 @@ app.get('/telegram/messages', async (req, res) => {
                         }
                     }
                 }
-                
+
                 audioMessages.push({
                     messageId: msg.id,
                     fileName,
@@ -132,7 +130,7 @@ app.get('/telegram/messages', async (req, res) => {
                 });
             }
         }
-        
+
         res.json(audioMessages);
     } catch (e) {
         console.error('Error fetching telegram messages:', e);
@@ -140,19 +138,55 @@ app.get('/telegram/messages', async (req, res) => {
     }
 });
 
+function setMediaHeaders(res, targetMessage, inline = true) {
+    const mimeType = targetMessage?.file?.mimeType || targetMessage?.media?.document?.mimeType || 'audio/mp4';
+    const fileSize = Number(targetMessage?.file?.size || targetMessage?.media?.document?.size || 0);
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Content-Type', mimeType);
+
+    if (fileSize > 0) {
+        res.setHeader('Content-Length', fileSize);
+    }
+
+    if (inline) {
+        res.setHeader('Content-Disposition', 'inline; filename="' + (targetMessage?.file?.name || 'audio.m4a') + '"');
+    }
+}
+
 app.head('/audio/message/:messageId', async (req, res) => {
     try {
         const messageId = Number(req.params.messageId);
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
+
         const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
-        if (!targetMessage || !targetMessage.media || !targetMessage.media.document) {
-            return res.status(404).end();
-        }
-        res.setHeader('Content-Length', Number(targetMessage.file.size));
-        res.setHeader('Content-Type', targetMessage.file.mimeType || 'audio/mp4');
-        res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Cache-Control', 'no-cache');
+        if (!targetMessage || !targetMessage.file) return res.status(404).end();
+
+        setMediaHeaders(res, targetMessage);
         res.status(200).end();
     } catch (e) {
+        console.error('HEAD media error:', e);
+        res.status(500).end();
+    }
+});
+
+app.head('/video/message/:messageId', async (req, res) => {
+    try {
+        const messageId = Number(req.params.messageId);
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
+
+        const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+        if (!targetMessage || !targetMessage.file) return res.status(404).end();
+
+        setMediaHeaders(res, targetMessage);
+        res.status(200).end();
+    } catch (e) {
+        console.error('HEAD video error:', e);
         res.status(500).end();
     }
 });
@@ -160,27 +194,64 @@ app.head('/audio/message/:messageId', async (req, res) => {
 app.get('/download/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+
         const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
+
+        setMediaHeaders(res, targetMessage, false);
         res.setHeader('Content-Disposition', 'attachment; filename="' + (targetMessage.file.name || 'audio.m4a') + '"');
-        await streamAudio(req, res, targetMessage);
-    } catch(e) { res.status(500).send('Error'); }
+        await streamMedia(req, res, targetMessage);
+    } catch(e) {
+        console.error('Download error:', e);
+        if (!res.headersSent) res.status(500).send('Error');
+        else res.destroy(e);
+    }
 });
 
 app.get('/audio/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+
         const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
-        await streamAudio(req, res, targetMessage);
-    } catch(e) { res.status(500).send('Error'); }
+
+        setMediaHeaders(res, targetMessage, true);
+        await streamMedia(req, res, targetMessage);
+    } catch(e) {
+        console.error('Audio route error:', e);
+        if (!res.headersSent) res.status(500).send('Error');
+        else res.destroy(e);
+    }
 });
 
-async function streamAudio(req, res, targetMessage) {
+app.get('/video/message/:messageId', async (req, res) => {
+    const messageId = Number(req.params.messageId);
+    try {
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+
+        const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+        if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
+
+        setMediaHeaders(res, targetMessage, true);
+        await streamMedia(req, res, targetMessage);
+    } catch(e) {
+        console.error('Video route error:', e);
+        if (!res.headersSent) res.status(500).send('Error');
+        else res.destroy(e);
+    }
+});
+
+async function streamMedia(req, res, targetMessage) {
     const fileSize = Number(targetMessage.file.size);
+    if (!Number.isFinite(fileSize) || fileSize <= 0) {
+        return res.status(404).send('File size unavailable');
+    }
+
     try {
         const rangeHeader = req.headers.range;
-        console.log("\n🎧 AUDIO REQUEST");
+        console.log("\n🎧 MEDIA REQUEST");
         console.log("Range:", rangeHeader || "none");
 
         let start = 0;
@@ -193,15 +264,16 @@ async function streamAudio(req, res, targetMessage) {
                 res.setHeader("Content-Range", `bytes */${fileSize}`);
                 return res.end();
             }
+
             start = Number(match[1]);
-            if (match[2]) {
-                end = Number(match[2]);
-            }
-            if (start >= fileSize || start > end) {
+            if (match[2]) end = Number(match[2]);
+
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start >= fileSize || start > end) {
                 res.status(416);
                 res.setHeader("Content-Range", `bytes */${fileSize}`);
                 return res.end();
             }
+
             end = Math.min(end, fileSize - 1);
         }
 
@@ -215,33 +287,25 @@ async function streamAudio(req, res, targetMessage) {
         }
 
         res.setHeader("Content-Length", contentLength);
-        res.setHeader("Content-Type", targetMessage.file.mimeType || "audio/mp4");
         res.setHeader("Accept-Ranges", "bytes");
         res.setHeader("Cache-Control", "no-cache");
 
         console.log(`📡 HTTP range: ${start} → ${end}`);
         console.log(`📦 HTTP bytes: ${contentLength}`);
 
-        const ALIGN = 1048576; // 1MB alignment prevents LimitInvalidError
-        let currentOffset = start;
+        const ALIGN = 1048576;
+        const alignedOffset = Math.floor(start / ALIGN) * ALIGN;
+        const skipBytes = start - alignedOffset;
+        let skipRemaining = skipBytes;
         let remaining = contentLength;
         let totalSent = 0;
 
-        const alignedOffset = Math.floor(currentOffset / ALIGN) * ALIGN;
-        const skipBytes = currentOffset - alignedOffset;
-        let skipRemaining = skipBytes;
-
-        console.log(`⬇️  TG stream starting: aligned=${alignedOffset} skip=${skipBytes} remaining=${remaining}`);
-
-        let currentOffsetBefore, currentOffsetAfter, chunkReceived, remainingAfter, requestSize;
+        console.log(`⬇️ TG stream starting: aligned=${alignedOffset} skip=${skipBytes} remaining=${remaining}`);
 
         for await (const chunk of client.iterDownload(targetMessage, { offset: alignedOffset })) {
             if (res.destroyed) break;
+
             let data = chunk;
-            
-            chunkReceived = data.length;
-            currentOffsetBefore = currentOffset;
-            requestSize = chunkReceived;
 
             if (skipRemaining > 0) {
                 if (data.length <= skipRemaining) {
@@ -258,27 +322,13 @@ async function streamAudio(req, res, targetMessage) {
             if (output.length > 0) {
                 const writeOk = res.write(output);
                 totalSent += output.length;
-                currentOffset += output.length;
                 remaining -= output.length;
-
-                currentOffsetAfter = currentOffset;
-                remainingAfter = remaining;
-
-                console.log({
-                    currentOffsetBefore,
-                    alignedOffset,
-                    skipBytes,
-                    requestSize,
-                    chunkReceived,
-                    currentOffsetAfter,
-                    remainingAfter
-                });
 
                 if (!writeOk && !res.destroyed) {
                     await new Promise((resolve) => res.once("drain", resolve));
                 }
             }
-            
+
             if (remaining <= 0) break;
         }
 
@@ -287,9 +337,7 @@ async function streamAudio(req, res, targetMessage) {
         }
 
         console.log(`✅ Streamed ${totalSent} bytes`);
-        if (!res.destroyed) {
-            res.end();
-        }
+        if (!res.destroyed) res.end();
     } catch (error) {
         console.error("\n❌ STREAM ERROR:");
         console.error(error);
