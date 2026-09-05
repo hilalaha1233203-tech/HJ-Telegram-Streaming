@@ -64,8 +64,6 @@ app.get("/", (req, res) => {
 <body style="margin:0; padding:40px; background:#111; color:white; font-family:Arial,sans-serif;">
 <h1>HJ GROUPS Telegram Streaming</h1>
 <audio controls preload="metadata" style="width:100%; max-width:700px;" src="/audio/message/7"></audio>
-<br><br>
-<a href="/download/message/7" target="_blank" style="color:#7C83FF;">Download audio</a>
 </body>
 </html>`);
 });
@@ -138,25 +136,26 @@ app.get('/telegram/messages', async (req, res) => {
     }
 });
 
-function setMediaHeaders(res, targetMessage, inline = true) {
+function setMediaHeaders(res, targetMessage) {
     const mimeType = targetMessage?.file?.mimeType || targetMessage?.media?.document?.mimeType || 'audio/mp4';
     const fileSize = Number(targetMessage?.file?.size || targetMessage?.media?.document?.size || 0);
+    const rawName = targetMessage?.file?.name || 'media';
+    const safeName = String(rawName).replace(/[\\\"\r\n]/g, '_');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type');
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Content-Type', mimeType);
 
     if (fileSize > 0) {
         res.setHeader('Content-Length', fileSize);
     }
 
-    if (inline) {
-        res.setHeader('Content-Disposition', 'inline; filename="' + (targetMessage?.file?.name || 'audio.m4a') + '"');
-    }
+    // Playback only. There is intentionally no public download/attachment route.
+    res.setHeader('Content-Disposition', 'inline; filename="' + safeName + '"');
 }
 
 app.head('/audio/message/:messageId', async (req, res) => {
@@ -191,24 +190,8 @@ app.head('/video/message/:messageId', async (req, res) => {
     }
 });
 
-app.get('/download/message/:messageId', async (req, res) => {
-    const messageId = Number(req.params.messageId);
-    try {
-        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
-
-        const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
-        if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
-
-        setMediaHeaders(res, targetMessage, false);
-        res.setHeader('Content-Disposition', 'attachment; filename="' + (targetMessage.file.name || 'audio.m4a') + '"');
-        await streamMedia(req, res, targetMessage);
-    } catch(e) {
-        console.error('Download error:', e);
-        if (!res.headersSent) res.status(500).send('Error');
-        else res.destroy(e);
-    }
-});
-
+// Deliberately no /download/message/:messageId route.
+// Users are allowed to stream media only through the playback endpoints.
 app.get('/audio/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
@@ -217,7 +200,7 @@ app.get('/audio/message/:messageId', async (req, res) => {
         const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
 
-        setMediaHeaders(res, targetMessage, true);
+        setMediaHeaders(res, targetMessage);
         await streamMedia(req, res, targetMessage);
     } catch(e) {
         console.error('Audio route error:', e);
@@ -234,7 +217,7 @@ app.get('/video/message/:messageId', async (req, res) => {
         const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
 
-        setMediaHeaders(res, targetMessage, true);
+        setMediaHeaders(res, targetMessage);
         await streamMedia(req, res, targetMessage);
     } catch(e) {
         console.error('Video route error:', e);
@@ -288,7 +271,7 @@ async function streamMedia(req, res, targetMessage) {
 
         res.setHeader("Content-Length", contentLength);
         res.setHeader("Accept-Ranges", "bytes");
-        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
 
         console.log(`📡 HTTP range: ${start} → ${end}`);
         console.log(`📦 HTTP bytes: ${contentLength}`);
