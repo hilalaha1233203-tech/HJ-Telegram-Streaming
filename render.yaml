@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: hj-telegram-streaming
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: TELEGRAM_SESSION
+        sync: false
+      - key: NODE_ENV
+        value: production
