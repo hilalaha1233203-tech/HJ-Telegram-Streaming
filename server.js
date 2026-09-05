@@ -6,15 +6,42 @@ const { StringSession } = require("teleproto/sessions");
 require("dotenv").config();
 
 const app = express();
-const PORT = 3000;
-const CHANNEL_ID = -1004407564857;
+const PORT = process.env.PORT || 3000;
 const FILE_NAME = "TEST.m4a";
 
-const SESSION_FILE = path.join(__dirname, "telegram-session.txt");
 const API_ID = Number(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
+const CHANNEL_ID = Number(process.env.CHANNEL_ID);
 
-const savedSession = fs.existsSync(SESSION_FILE) ? fs.readFileSync(SESSION_FILE, "utf8").trim() : "";
+if (!process.env.API_ID || isNaN(API_ID)) {
+    console.error("❌ Startup Error: API_ID is missing or not numeric.");
+    process.exit(1);
+}
+if (!API_HASH) {
+    console.error("❌ Startup Error: API_HASH is missing.");
+    process.exit(1);
+}
+if (!process.env.CHANNEL_ID || isNaN(CHANNEL_ID)) {
+    console.error("❌ Startup Error: CHANNEL_ID is missing or not numeric.");
+    process.exit(1);
+}
+
+const SESSION_FILE = path.join(__dirname, "telegram-session.txt");
+const fileSession = fs.existsSync(SESSION_FILE) ? fs.readFileSync(SESSION_FILE, "utf8").trim() : "";
+const envSession = (process.env.TELEGRAM_SESSION || "").trim();
+
+const savedSession = envSession || fileSession;
+
+if (process.env.NODE_ENV === "production" && !envSession) {
+    console.error("❌ Startup Error: TELEGRAM_SESSION is required in production.");
+    process.exit(1);
+}
+
+console.log(
+    "Telegram session source:",
+    envSession ? "environment" : (fileSession ? "file" : "missing")
+);
+
 const client = new TelegramClient(new StringSession(savedSession), API_ID, API_HASH, { connectionRetries: 5 });
 
 async function connectTelegram() {
