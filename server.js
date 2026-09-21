@@ -9,8 +9,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const FILE_NAME = "TEST.m4a";
 
-const API_ID = Number(process.env.API_ID);
-const API_HASH = (process.env.API_HASH || "").trim();
+// Support both the original variable names and the clearer Vercel names.
+const API_ID = Number(process.env.API_ID || process.env.TELEGRAM_API_ID);
+const API_HASH = (process.env.API_HASH || process.env.TELEGRAM_API_HASH || "").trim();
 const CHANNEL_ID = Number(process.env.CHANNEL_ID);
 
 const SESSION_FILE = path.join(__dirname, "telegram-session.txt");
@@ -26,11 +27,11 @@ let telegramConnectionPromise = null;
 function validateTelegramConfig() {
     const problems = [];
 
-    if (!process.env.API_ID || !Number.isInteger(API_ID) || API_ID <= 0) {
-        problems.push("API_ID is missing or not numeric");
+    if ((!process.env.API_ID && !process.env.TELEGRAM_API_ID) || !Number.isInteger(API_ID) || API_ID <= 0) {
+        problems.push("API_ID / TELEGRAM_API_ID is missing or not numeric");
     }
     if (!API_HASH) {
-        problems.push("API_HASH is missing");
+        problems.push("API_HASH / TELEGRAM_API_HASH is missing");
     }
     if (!process.env.CHANNEL_ID || !Number.isInteger(CHANNEL_ID) || CHANNEL_ID === 0) {
         problems.push("CHANNEL_ID is missing or not numeric");
