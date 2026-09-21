@@ -151,37 +151,50 @@ app.get('/telegram/messages', async (req, res) => {
         const telegram = await ensureTelegramConnected();
         const messages = await telegram.getMessages(CHANNEL_ID, { limit });
 
-        const audioMessages = [];
-        for (const msg of messages) {
-            if (msg.media && msg.media.document && msg.media.document.mimeType && msg.media.document.mimeType.startsWith('audio/')) {
-                const doc = msg.media.document;
-                let fileName = 'audio.m4a';
-                let duration = 0;
+        const mediaType = req.query.type === 'video' ? 'video' : 'audio';
+        const mediaMessages = [];
 
-                if (doc.attributes) {
-                    for (const attr of doc.attributes) {
-                        if (attr.className === 'DocumentAttributeFilename') {
-                            fileName = attr.fileName;
-                        }
-                        if (attr.className === 'DocumentAttributeAudio') {
-                            duration = attr.duration;
-                        }
+        for (const msg of messages) {
+            const doc = msg.media && msg.media.document;
+            const mimeType = String(doc?.mimeType || '');
+
+            if (!doc || !mimeType.startsWith(mediaType + '/')) continue;
+
+            let fileName = mediaType === 'video' ? 'video.mp4' : 'audio.m4a';
+            let duration = 0;
+            let width = 0;
+            let height = 0;
+
+            if (doc.attributes) {
+                for (const attr of doc.attributes) {
+                    if (attr.className === 'DocumentAttributeFilename' && attr.fileName) {
+                        fileName = attr.fileName;
+                    }
+                    if (attr.className === 'DocumentAttributeAudio') {
+                        duration = attr.duration || 0;
+                    }
+                    if (attr.className === 'DocumentAttributeVideo') {
+                        duration = attr.duration || 0;
+                        width = attr.w || 0;
+                        height = attr.h || 0;
                     }
                 }
-
-                audioMessages.push({
-                    messageId: msg.id,
-                    fileName,
-                    mimeType: doc.mimeType,
-                    size: Number(doc.size),
-                    duration,
-                    date: msg.date,
-                    caption: msg.message || ''
-                });
             }
+
+            mediaMessages.push({
+                messageId: msg.id,
+                fileName,
+                mimeType,
+                size: Number(doc.size),
+                duration,
+                width,
+                height,
+                date: msg.date,
+                caption: msg.message || ''
+            });
         }
 
-        res.json(audioMessages);
+        res.json(mediaMessages);
     } catch (e) {
         console.error('Error fetching telegram messages:', e);
         res.status(500).json({ error: 'Internal server error while fetching Telegram messages' });
@@ -243,6 +256,23 @@ app.head('/video/message/:messageId', async (req, res) => {
     }
 });
 
+app.head('/document/message/:messageId', async (req, res) => {
+    try {
+        const messageId = Number(req.params.messageId);
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
+
+        const telegram = await ensureTelegramConnected();
+        const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
+        if (!targetMessage || !targetMessage.file) return res.status(404).end();
+
+        setMediaHeaders(res, targetMessage);
+        res.status(200).end();
+    } catch (e) {
+        console.error('HEAD document error:', e);
+        res.status(500).end();
+    }
+});
+
 // Deliberately no /download/message/:messageId route.
 app.get('/audio/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
@@ -281,6 +311,24 @@ app.get('/video/message/:messageId', async (req, res) => {
         await streamMedia(req, res, targetMessage);
     } catch(e) {
         console.error('Video route error:', e);
+        if (!res.headersSent) res.status(500).send('Error');
+        else res.destroy(e);
+    }
+});
+
+app.get('/document/message/:messageId', async (req, res) => {
+    const messageId = Number(req.params.messageId);
+    try {
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+
+        const telegram = await ensureTelegramConnected();
+        const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
+        if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
+
+        setMediaHeaders(res, targetMessage);
+        await streamMedia(req, res, targetMessage);
+    } catch(e) {
+        console.error('Document route error:', e);
         if (!res.headersSent) res.status(500).send('Error');
         else res.destroy(e);
     }
