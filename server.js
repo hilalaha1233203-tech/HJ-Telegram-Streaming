@@ -84,6 +84,10 @@ async function ensureTelegramConnected() {
     return telegramConnectionPromise;
 }
 
+app.get('/favicon.ico', (req, res) => {
+    res.status(204).end();
+});
+
 app.get("/health", (req, res) => {
     res.status(200).json({ status: "ok", service: "hj-telegram-streaming" });
 });
