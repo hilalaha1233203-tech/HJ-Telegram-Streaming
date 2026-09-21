@@ -9,6 +9,40 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const FILE_NAME = "TEST.m4a";
 
+const ALLOWED_ORIGINS = new Set([
+    "https://hj-groups-website.getvoroa.com",
+]);
+
+// CORS must run before every route, including OPTIONS preflight requests.
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+
+    if (origin && ALLOWED_ORIGINS.has(origin)) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
+    }
+
+    res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET, HEAD, OPTIONS"
+    );
+    res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Authorization, Content-Type, Range"
+    );
+    res.setHeader(
+        "Access-Control-Expose-Headers",
+        "Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type"
+    );
+    res.setHeader("Access-Control-Max-Age", "86400");
+
+    if (req.method === "OPTIONS") {
+        return res.status(204).end();
+    }
+
+    next();
+});
+
 // Support both the original variable names and the clearer Vercel names.
 const API_ID = Number(process.env.API_ID || process.env.TELEGRAM_API_ID);
 const API_HASH = (process.env.API_HASH || process.env.TELEGRAM_API_HASH || "").trim();
