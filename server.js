@@ -88,6 +88,16 @@ app.get('/favicon.ico', (req, res) => {
     res.status(204).end();
 });
 
+app.get('/telegram/status', (req, res) => {
+    const config = validateTelegramConfig();
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.status(config.length ? 503 : 200).json({
+        ok: config.length === 0,
+        telegramConfigured: config.length === 0,
+        missing: config.map((item) => item.split(' is ')[0]),
+    });
+});
+
 app.get("/health", (req, res) => {
     res.status(200).json({ status: "ok", service: "hj-telegram-streaming" });
 });
@@ -246,8 +256,14 @@ app.get('/audio/message/:messageId', async (req, res) => {
         await streamMedia(req, res, targetMessage);
     } catch(e) {
         console.error('Audio route error:', e);
-        if (!res.headersSent) res.status(500).send('Error');
-        else res.destroy(e);
+        if (!res.headersSent) {
+            res.status(500).json({
+                error: 'Telegram audio streaming failed',
+                message: String(e?.message || e),
+            });
+        } else {
+            res.destroy(e);
+        }
     }
 });
 
