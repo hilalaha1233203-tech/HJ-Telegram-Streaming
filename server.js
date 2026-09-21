@@ -10,46 +10,78 @@ const PORT = process.env.PORT || 3000;
 const FILE_NAME = "TEST.m4a";
 
 const API_ID = Number(process.env.API_ID);
-const API_HASH = process.env.API_HASH;
+const API_HASH = (process.env.API_HASH || "").trim();
 const CHANNEL_ID = Number(process.env.CHANNEL_ID);
 
-if (!process.env.API_ID || isNaN(API_ID)) {
-    console.error("❌ Startup Error: API_ID is missing or not numeric.");
-    process.exit(1);
-}
-if (!API_HASH) {
-    console.error("❌ Startup Error: API_HASH is missing.");
-    process.exit(1);
-}
-if (!process.env.CHANNEL_ID || isNaN(CHANNEL_ID)) {
-    console.error("❌ Startup Error: CHANNEL_ID is missing or not numeric.");
-    process.exit(1);
-}
-
 const SESSION_FILE = path.join(__dirname, "telegram-session.txt");
-const fileSession = fs.existsSync(SESSION_FILE) ? fs.readFileSync(SESSION_FILE, "utf8").trim() : "";
+const fileSession = fs.existsSync(SESSION_FILE)
+    ? fs.readFileSync(SESSION_FILE, "utf8").trim()
+    : "";
 const envSession = (process.env.TELEGRAM_SESSION || "").trim();
 const savedSession = envSession || fileSession;
 
-if (process.env.NODE_ENV === "production" && !envSession) {
-    console.error("❌ Startup Error: TELEGRAM_SESSION is required in production.");
-    process.exit(1);
+let client = null;
+let telegramConnectionPromise = null;
+
+function validateTelegramConfig() {
+    const problems = [];
+
+    if (!process.env.API_ID || !Number.isInteger(API_ID) || API_ID <= 0) {
+        problems.push("API_ID is missing or not numeric");
+    }
+    if (!API_HASH) {
+        problems.push("API_HASH is missing");
+    }
+    if (!process.env.CHANNEL_ID || !Number.isInteger(CHANNEL_ID) || CHANNEL_ID === 0) {
+        problems.push("CHANNEL_ID is missing or not numeric");
+    }
+    if (!savedSession) {
+        problems.push("TELEGRAM_SESSION is missing");
+    }
+
+    return problems;
 }
 
-console.log(
-    "Telegram session source:",
-    envSession ? "environment" : (fileSession ? "file" : "missing")
-);
-
-const client = new TelegramClient(new StringSession(savedSession), API_ID, API_HASH, { connectionRetries: 5 });
-
 async function connectTelegram() {
+    const problems = validateTelegramConfig();
+    if (problems.length) {
+        throw new Error("Telegram configuration error: " + problems.join("; "));
+    }
+
+    if (!client) {
+        console.log(
+            "Telegram session source:",
+            envSession ? "environment" : (fileSession ? "file" : "missing")
+        );
+
+        client = new TelegramClient(
+            new StringSession(savedSession),
+            API_ID,
+            API_HASH,
+            { connectionRetries: 5 }
+        );
+    }
+
     console.log("🔄 Connecting to Telegram...");
     await client.connect();
+
     if (!(await client.isUserAuthorized())) {
         throw new Error("❌ Telegram session is not authorized.");
     }
+
     console.log("✅ Telegram session connected!");
+    return client;
+}
+
+async function ensureTelegramConnected() {
+    if (!telegramConnectionPromise) {
+        telegramConnectionPromise = connectTelegram().catch((error) => {
+            telegramConnectionPromise = null;
+            throw error;
+        });
+    }
+
+    return telegramConnectionPromise;
 }
 
 app.get("/health", (req, res) => {
@@ -101,7 +133,8 @@ app.get('/telegram/messages', async (req, res) => {
         }
 
         const limit = Number(req.query.limit) || 100;
-        const messages = await client.getMessages(CHANNEL_ID, { limit });
+        const telegram = await ensureTelegramConnected();
+        const messages = await telegram.getMessages(CHANNEL_ID, { limit });
 
         const audioMessages = [];
         for (const msg of messages) {
@@ -166,7 +199,8 @@ app.head('/audio/message/:messageId', async (req, res) => {
         const messageId = Number(req.params.messageId);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
 
-        const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+        const telegram = await ensureTelegramConnected();
+        const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).end();
 
         setMediaHeaders(res, targetMessage);
@@ -182,7 +216,8 @@ app.head('/video/message/:messageId', async (req, res) => {
         const messageId = Number(req.params.messageId);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
 
-        const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+        const telegram = await ensureTelegramConnected();
+        const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).end();
 
         setMediaHeaders(res, targetMessage);
@@ -199,7 +234,8 @@ app.get('/audio/message/:messageId', async (req, res) => {
     try {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
 
-        const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+        const telegram = await ensureTelegramConnected();
+        const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
 
         setMediaHeaders(res, targetMessage);
@@ -216,7 +252,8 @@ app.get('/video/message/:messageId', async (req, res) => {
     try {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
 
-        const [targetMessage] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+        const telegram = await ensureTelegramConnected();
+        const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
 
         setMediaHeaders(res, targetMessage);
@@ -279,7 +316,7 @@ async function streamMedia(req, res, targetMessage) {
         let remaining = contentLength;
         let totalSent = 0;
 
-        for await (const chunk of client.iterDownload(targetMessage, { offset: alignedOffset })) {
+        for await (const chunk of (await ensureTelegramConnected()).iterDownload(targetMessage, { offset: alignedOffset })) {
             if (res.destroyed) break;
 
             let data = chunk;
@@ -327,7 +364,7 @@ async function streamMedia(req, res, targetMessage) {
 }
 
 async function startServer() {
-    await connectTelegram();
+    await ensureTelegramConnected();
     app.listen(PORT, () => {
         console.log("\n======================================");
         console.log("🚀 HJ GROUPS STREAM SERVER");
@@ -338,8 +375,12 @@ async function startServer() {
     });
 }
 
-startServer().catch((error) => {
-    console.error("\n❌ SERVER START ERROR:");
-    console.error(error);
-    process.exit(1);
-});
+if (require.main === module) {
+    startServer().catch((error) => {
+        console.error("\n❌ SERVER START ERROR:");
+        console.error(error);
+        process.exit(1);
+    });
+}
+
+module.exports = app;
