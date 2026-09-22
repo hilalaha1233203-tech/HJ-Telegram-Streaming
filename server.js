@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 const FILE_NAME = "TEST.m4a";
 
 const ALLOWED_ORIGINS = new Set([
+    "https://hj-groups-web.vercel.app",
     "https://hj-groups-website.getvoroa.com",
 ]);
 
@@ -185,16 +186,34 @@ app.get('/telegram/messages', async (req, res) => {
         const telegram = await ensureTelegramConnected();
         const messages = await telegram.getMessages(CHANNEL_ID, { limit });
 
-        const mediaType = req.query.type === 'video' ? 'video' : 'audio';
+        const requestedType = String(req.query.type || 'audio').toLowerCase();
+        const mediaType = ['audio', 'video', 'document'].includes(requestedType)
+            ? requestedType
+            : 'audio';
         const mediaMessages = [];
 
         for (const msg of messages) {
             const doc = msg.media && msg.media.document;
-            const mimeType = String(doc?.mimeType || '');
+            const mimeType = String(doc?.mimeType || '').toLowerCase();
 
-            if (!doc || !mimeType.startsWith(mediaType + '/')) continue;
+            if (!doc) continue;
 
-            let fileName = mediaType === 'video' ? 'video.mp4' : 'audio.m4a';
+            if (mediaType === 'audio' && !mimeType.startsWith('audio/')) continue;
+            if (mediaType === 'video' && !mimeType.startsWith('video/')) continue;
+            if (mediaType === 'document') {
+                const looksLikeBook =
+                    mimeType === 'application/pdf' ||
+                    mimeType === 'application/epub+zip' ||
+                    (!mimeType.startsWith('audio/') && !mimeType.startsWith('video/'));
+                if (!looksLikeBook) continue;
+            }
+
+            let fileName =
+                mediaType === 'video'
+                    ? 'video.mp4'
+                    : mediaType === 'document'
+                        ? 'book.pdf'
+                        : 'audio.m4a';
             let duration = 0;
             let width = 0;
             let height = 0;
