@@ -155,15 +155,11 @@ app.get("/", (req, res) => {
 });
 
 app.options('/telegram/messages', (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization');
-    res.status(200).end();
+    // The global CORS middleware already sets the origin/header policy.
+    res.status(204).end();
 });
 
 app.get('/telegram/messages', async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization');
-
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'Unauthorized: Missing Authorization header' });
 
@@ -195,11 +191,14 @@ app.get('/telegram/messages', async (req, res) => {
         for (const msg of messages) {
             const doc = msg.media && msg.media.document;
             const mimeType = String(doc?.mimeType || '').toLowerCase();
+            const attributes = Array.isArray(doc?.attributes) ? doc.attributes : [];
+            const hasAudioAttribute = attributes.some((attr) => attr.className === 'DocumentAttributeAudio');
+            const hasVideoAttribute = attributes.some((attr) => attr.className === 'DocumentAttributeVideo');
 
             if (!doc) continue;
 
-            if (mediaType === 'audio' && !mimeType.startsWith('audio/')) continue;
-            if (mediaType === 'video' && !mimeType.startsWith('video/')) continue;
+            if (mediaType === 'audio' && !mimeType.startsWith('audio/') && !hasAudioAttribute) continue;
+            if (mediaType === 'video' && !mimeType.startsWith('video/') && !hasVideoAttribute) continue;
             if (mediaType === 'document') {
                 const looksLikeBook =
                     mimeType === 'application/pdf' ||
