@@ -29,6 +29,9 @@ let activeRun = null;
 let stopped = false;
 let paused = false;
 let previousInputRawMode = false;
+let reconnectPromise = null;
+
+const LOCK_FILE = path.join(ROOT, "auto-link-sender.lock");
 
 function stamp() {
   return new Date().toISOString();
@@ -135,6 +138,111 @@ function clearState() {
   } catch (err) {
     log("Could not remove state file: " + err.message);
   }
+}
+
+function acquireProcessLock() {
+  if (fs.existsSync(LOCK_FILE)) {
+    try {
+      const lock = JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
+      const pid = Number(lock.pid);
+      if (Number.isInteger(pid) && pid > 0) {
+        try {
+          process.kill(pid, 0);
+          throw new Error(
+            "Another HJ Telegram Auto Sender process is already running (PID " + pid + ")."
+          );
+        } catch (err) {
+          if (err && err.message && err.message.startsWith("Another HJ Telegram Auto Sender")) {
+            throw err;
+          }
+          // PID is stale; replace the lock below.
+        }
+      }
+    } catch (err) {
+      if (err && err.message && err.message.startsWith("Another HJ Telegram Auto Sender")) {
+        throw err;
+      }
+      // Invalid/stale lock file; replace it.
+    }
+  }
+
+  fs.writeFileSync(
+    LOCK_FILE,
+    JSON.stringify({ pid: process.pid, startedAt: stamp() }) + "\n",
+    "utf8"
+  );
+}
+
+function releaseProcessLock() {
+  try {
+    if (!fs.existsSync(LOCK_FILE)) return;
+    const lock = JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
+    if (Number(lock.pid) === process.pid) {
+      fs.unlinkSync(LOCK_FILE);
+    }
+  } catch (_) {
+    // Best-effort cleanup only.
+  }
+}
+
+function isTelegramConnected() {
+  if (!client) return false;
+  if (typeof client.connected === "boolean") return client.connected;
+  if (typeof client.isConnected === "function") {
+    try { return Boolean(client.isConnected()); } catch (_) {}
+  }
+  // If the library does not expose connection state, let the API call decide.
+  return true;
+}
+
+async function ensureTelegramConnected() {
+  if (!client) throw new Error("Telegram client is not initialized.");
+  if (isTelegramConnected()) return;
+
+  if (!reconnectPromise) {
+    reconnectPromise = (async function () {
+      log("Telegram is disconnected. Reconnecting...");
+      await client.connect();
+
+      const authorized = typeof client.isUserAuthorized === "function"
+        ? await client.isUserAuthorized()
+        : await client.checkAuthorization();
+
+      if (!authorized) {
+        throw new Error("Telegram session is no longer authorized.");
+      }
+
+      log("Telegram reconnected successfully.");
+    })().finally(function () {
+      reconnectPromise = null;
+    });
+  }
+
+  await reconnectPromise;
+}
+
+async function reconnectWithBackoff() {
+  const delays = [0, 30, 60, 120, 300];
+  let attempt = 0;
+
+  while (!stopped) {
+    const delay = delays[Math.min(attempt, delays.length - 1)];
+    if (delay > 0) {
+      log("Reconnect retry " + (attempt + 1) + " in " + formatTime(delay) + ".");
+      await waitControlled(delay);
+      if (stopped) return false;
+    }
+
+    try {
+      await ensureTelegramConnected();
+      return true;
+    } catch (err) {
+      log("Reconnect attempt " + (attempt + 1) + " failed: " + err.message);
+      attempt += 1;
+    }
+  }
+
+  return false;
 }
 
 function validateConfig() {
@@ -365,8 +473,14 @@ async function run(state) {
       log("Failed " + start + "-" + end + ": " + err.message);
 
       if (!stopped) {
-        log("Retrying in " + formatTime(RETRY_DELAY_SECONDS) + ".");
-        await waitControlled(RETRY_DELAY_SECONDS);
+        const recovered = await reconnectWithBackoff();
+
+        if (recovered && !stopped) {
+          log("Telegram connection is healthy again. Retrying the same unsent batch " + start + "-" + end + ".");
+        } else if (!stopped) {
+          log("Telegram is still unavailable. Retrying the same unsent batch after " + formatTime(RETRY_DELAY_SECONDS) + ".");
+          await waitControlled(RETRY_DELAY_SECONDS);
+        }
       }
     }
   }
@@ -472,6 +586,7 @@ async function main() {
 
   try {
     validateConfig();
+    acquireProcessLock();
     await loginTelegram();
 
     const autoResume = process.argv.includes("--auto-resume");
@@ -496,6 +611,7 @@ async function main() {
     if (client) {
       try { await client.disconnect(); } catch (_) {}
     }
+    releaseProcessLock();
   }
 }
 
