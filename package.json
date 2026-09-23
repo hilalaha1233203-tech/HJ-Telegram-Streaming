@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --check server.js"
+    "test": "node --check server.js && node --check auto-link-sender.js",
+    "auto-link": "node auto-link-sender.js"
   },
   "keywords": [],
   "author": "",
