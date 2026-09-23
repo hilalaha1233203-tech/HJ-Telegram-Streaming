@@ -25,7 +25,7 @@ The tool logs in as your normal Telegram USER account through MTProto. It does n
 
 That means the destination can remain a third-party bot. The account must be able to open and message that bot normally in Telegram.
 
-The generated telegram-session.txt is a private authentication credential. Never upload it to GitHub, paste it into chat, or share it with anyone.
+The generated telegram-auto-link-session.txt is a private authentication credential. Never upload it to GitHub, paste it into chat, or share it with anyone.
 
 ## Windows setup
 
@@ -107,3 +107,6 @@ No Telegram channel message needs to be downloaded by this tool; it only sends t
 The third-party bot must accept this exact range-link format. This tool does not attempt to bypass the bot's own restrictions; it simply automates the same links you would otherwise send manually.
 
 If the target bot rejects a link, the tool logs the error and retries after AUTO_RETRY_DELAY_SECONDS.
+
+
+The auto sender intentionally uses a separate MTProto user session so it can run without sharing the authentication session used by the streaming service.
