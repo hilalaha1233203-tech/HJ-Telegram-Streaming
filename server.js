@@ -59,7 +59,7 @@ const savedSession = envSession || fileSession;
 
 // Premium/VIP media is issued as a short-lived signed ticket. The signing
 // secret never reaches the browser.
-const MEDIA_TICKET_TTL_MS = 5 * 60 * 1000;
+const MEDIA_TICKET_TTL_MS = 2 * 60 * 60 * 1000;
 const MEDIA_TICKET_SECRET = String(
     process.env.MEDIA_TICKET_SECRET ||
     process.env.TELEGRAM_SESSION ||
@@ -107,9 +107,8 @@ function parseAccessTypes(raw) {
 
 function isProtectedPolicy(row) {
     const types = parseAccessTypes(row?.access_type);
-    return !types.includes('free') &&
-        !types.includes('ads') &&
-        (types.includes('premium') || types.includes('vip'));
+    // Paid access always wins over legacy/accidental free or ads flags.
+    return types.includes('premium') || types.includes('vip');
 }
 
 async function supabaseJson(pathname, authHeader = '') {
@@ -502,8 +501,6 @@ app.head('/audio/message/:messageId', async (req, res) => {
     try {
         const messageId = Number(req.params.messageId);
         if (await guardDirectMediaRoute(req, res, 'audio', messageId)) return;
-        const access = await inspectMediaAccess(req, 'audio', messageId);
-        if (!access.ok) return sendAccessError(res, access);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
 
         const telegram = await ensureTelegramConnected();
@@ -522,8 +519,6 @@ app.head('/video/message/:messageId', async (req, res) => {
     try {
         const messageId = Number(req.params.messageId);
         if (await guardDirectMediaRoute(req, res, 'video', messageId)) return;
-        const access = await inspectMediaAccess(req, 'video', messageId);
-        if (!access.ok) return sendAccessError(res, access);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
 
         const telegram = await ensureTelegramConnected();
@@ -542,8 +537,6 @@ app.head('/document/message/:messageId', async (req, res) => {
     try {
         const messageId = Number(req.params.messageId);
         if (await guardDirectMediaRoute(req, res, 'document', messageId)) return;
-        const access = await inspectMediaAccess(req, 'document', messageId);
-        if (!access.ok) return sendAccessError(res, access);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
 
         const telegram = await ensureTelegramConnected();
@@ -583,8 +576,9 @@ app.get('/media-ticket/:type/message/:messageId', async (req, res) => {
         }
 
         const token = createMediaTicket(type, messageId, userId);
+        const expiresAt = new Date(Date.now() + MEDIA_TICKET_TTL_MS).toISOString();
         const url = publicBaseUrl(req) +
-            '/' + type + '/secure-message/' + encodeURIComponent(messageId) +
+            '/' + type + '/message/' + encodeURIComponent(messageId) +
             '?ticket=' + encodeURIComponent(token);
 
         res.setHeader('Cache-Control', 'no-store');
@@ -595,62 +589,12 @@ app.get('/media-ticket/:type/message/:messageId', async (req, res) => {
     }
 });
 
-function registerSecureMediaRoutes(type) {
-    app.head('/' + type + '/secure-message/:messageId', async (req, res) => {
-        const messageId = Number(req.params.messageId);
-        if (!Number.isInteger(messageId) || messageId <= 0 ||
-            !verifyMediaTicket(type, messageId, req)) {
-            return res.status(401).end();
-        }
-
-        try {
-            const telegram = await ensureTelegramConnected();
-            const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
-            if (!targetMessage || !targetMessage.file) return res.status(404).end();
-            setMediaHeaders(res, targetMessage);
-            return res.status(200).end();
-        } catch (error) {
-            console.error("Secure HEAD " + type + " error:", error);
-            return res.status(500).end();
-        }
-    });
-
-    app.get('/' + type + '/secure-message/:messageId', async (req, res) => {
-        const messageId = Number(req.params.messageId);
-        if (!Number.isInteger(messageId) || messageId <= 0 ||
-            !verifyMediaTicket(type, messageId, req)) {
-            return res.status(401).send('Invalid or expired media ticket');
-        }
-
-        try {
-            const telegram = await ensureTelegramConnected();
-            const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
-            if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
-
-            setMediaHeaders(res, targetMessage);
-            return await streamMedia(req, res, targetMessage);
-        } catch (error) {
-            console.error("Secure " + type + " route error:", error);
-            if (!res.headersSent) return res.status(500).send('Secure media streaming failed');
-            return res.destroy(error);
-        }
-    });
-}
-
-registerSecureMediaRoutes('audio');
-registerSecureMediaRoutes('video');
-registerSecureMediaRoutes('document');
-
 // Deliberately no /download/message/:messageId route.
 app.get('/audio/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
         if (await guardDirectMediaRoute(req, res, 'audio', messageId)) return;
-
-        const ticket = String(req.query.ticket || '').trim();
-        const access = await inspectMediaAccess(req, 'audio', messageId);
-        if (!access.ok) return sendAccessError(res, access);
 
         const telegram = await ensureTelegramConnected();
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
@@ -677,10 +621,6 @@ app.get('/video/message/:messageId', async (req, res) => {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
         if (await guardDirectMediaRoute(req, res, 'video', messageId)) return;
 
-        const ticket = String(req.query.ticket || '').trim();
-        const access = await inspectMediaAccess(req, 'video', messageId);
-        if (!access.ok) return sendAccessError(res, access);
-
         const telegram = await ensureTelegramConnected();
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
@@ -699,10 +639,6 @@ app.get('/document/message/:messageId', async (req, res) => {
     try {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
         if (await guardDirectMediaRoute(req, res, 'document', messageId)) return;
-
-        const ticket = String(req.query.ticket || '').trim();
-        const access = await inspectMediaAccess(req, 'document', messageId);
-        if (!access.ok) return sendAccessError(res, access);
 
         const telegram = await ensureTelegramConnected();
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
