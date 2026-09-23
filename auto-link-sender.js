@@ -403,30 +403,44 @@ async function resumeExisting() {
 }
 
 async function createNew() {
+  const config = loadConfig();
+
   const rawLink = await ask(
     "\nPaste first link (example https://t.me/c/3607214438/799-803): "
   );
   const parsed = parseRangeLink(rawLink);
 
-  const config = loadConfig();
-  let botUsername = normalizeBotUsername(config.targetBot || process.env.AUTO_TARGET_BOT || "");
+  const savedBot = normalizeBotUsername(
+    config.targetBot || process.env.AUTO_TARGET_BOT || ""
+  );
+  const botPrompt = savedBot
+    ? "Target third-party bot username [" + savedBot + "]: "
+    : "Target third-party bot username (example @my_bot): ";
+  const botInput = (await ask(botPrompt)).trim();
+  const botValue = botInput || savedBot;
 
-  if (!botUsername) {
-    const botInput = await ask(
-      "Target third-party bot username (example @my_bot): "
-    );
-    botUsername = await resolveBot(botInput);
-    config.targetBot = botUsername;
-  } else {
-    botUsername = await resolveBot(botUsername);
+  if (!botValue) {
+    throw new Error("Target bot username is required.");
   }
 
-  const batchSize = Number(config.batchSize || DEFAULT_BATCH_SIZE);
-  const delaySeconds = Number(config.delaySeconds || DEFAULT_DELAY_SECONDS);
+  const botUsername = await resolveBot(botValue);
+
+  const savedBatchSize = Number(config.batchSize || DEFAULT_BATCH_SIZE);
+  const batchPrompt =
+    "Batch size [" + savedBatchSize + "]: ";
+  const batchInput = (await ask(batchPrompt)).trim();
+  const batchSize = Number(batchInput || savedBatchSize);
+
+  const savedDelaySeconds = Number(config.delaySeconds || DEFAULT_DELAY_SECONDS);
+  const delayPrompt =
+    "Delay between links in seconds [" + savedDelaySeconds + "]: ";
+  const delayInput = (await ask(delayPrompt)).trim();
+  const delaySeconds = Number(delayInput || savedDelaySeconds);
+
   const configuredLast = process.env.AUTO_LAST_MESSAGE_ID || config.lastMessageId || "";
   const lastMessageId = configuredLast ? Number(configuredLast) : null;
 
-  if (!config.targetBot) config.targetBot = botUsername;
+  config.targetBot = botUsername;
   config.batchSize = batchSize;
   config.delaySeconds = delaySeconds;
   if (lastMessageId !== null) config.lastMessageId = lastMessageId;
