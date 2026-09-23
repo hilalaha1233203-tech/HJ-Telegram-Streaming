@@ -12,7 +12,7 @@ const { StringSession } = require("teleproto/sessions");
 require("dotenv").config();
 
 const ROOT = __dirname;
-const SESSION_FILE = path.join(ROOT, "telegram-session.txt");
+const SESSION_FILE = path.join(ROOT, "telegram-auto-link-session.txt");
 const STATE_FILE = path.join(ROOT, "auto-link-sender-state.json");
 const LOG_FILE = path.join(ROOT, "auto-link-sender.log");
 
@@ -136,7 +136,7 @@ function validateConfig() {
 }
 
 async function loginTelegram() {
-  const envSession = String(process.env.TELEGRAM_SESSION || "").trim();
+  const envSession = String(process.env.AUTO_LINK_TELEGRAM_SESSION || "").trim();
   const fileSession = fs.existsSync(SESSION_FILE)
     ? fs.readFileSync(SESSION_FILE, "utf8").trim()
     : "";
