@@ -423,15 +423,13 @@ async function createNew() {
 
   const batchSize = Number(config.batchSize || DEFAULT_BATCH_SIZE);
   const delaySeconds = Number(config.delaySeconds || DEFAULT_DELAY_SECONDS);
-
-  const lastRaw = await ask(
-    "Last message ID (optional; Enter = run until stopped): "
-  );
-  const lastMessageId = lastRaw.trim() ? Number(lastRaw.trim()) : null;
+  const configuredLast = process.env.AUTO_LAST_MESSAGE_ID || config.lastMessageId || "";
+  const lastMessageId = configuredLast ? Number(configuredLast) : null;
 
   if (!config.targetBot) config.targetBot = botUsername;
   config.batchSize = batchSize;
   config.delaySeconds = delaySeconds;
+  if (lastMessageId !== null) config.lastMessageId = lastMessageId;
   saveConfig(config);
 
   if (!Number.isInteger(batchSize) || batchSize < 1) {
@@ -441,7 +439,7 @@ async function createNew() {
     throw new Error("Delay must be at least 1 second.");
   }
   if (lastMessageId !== null && (!Number.isSafeInteger(lastMessageId) || lastMessageId < parsed.end)) {
-    throw new Error("Last message ID is invalid.");
+    throw new Error("Configured last message ID is invalid.");
   }
 
   const state = createRun(parsed, botUsername, batchSize, delaySeconds, lastMessageId);
