@@ -46,8 +46,17 @@ fi
 mkdir -p "$HOME/.shortcuts"
 mkdir -p "$HOME/.termux/boot"
 
-cp "$HOME/HJ-Telegram-Streaming/android/HJ-Auto-Sender.sh" "$HOME/.shortcuts/HJ-Auto-Sender"
-chmod 700 "$HOME/.shortcuts/HJ-Auto-Sender"
+for SHORTCUT in \
+  HJ-Auto-Sender.sh \
+  HJ-Auto-Sender-Pause.sh \
+  HJ-Auto-Sender-Resume.sh \
+  HJ-Auto-Sender-Stop.sh \
+  HJ-Auto-Sender-Status.sh
+do
+  NAME="${SHORTCUT%.sh}"
+  cp "$HOME/HJ-Telegram-Streaming/android/$SHORTCUT" "$HOME/.shortcuts/$NAME"
+  chmod 700 "$HOME/.shortcuts/$NAME"
+done
 
 cp "$HOME/HJ-Telegram-Streaming/android/HJ-Auto-Sender-Boot.sh" "$HOME/.termux/boot/HJ-Auto-Sender-Boot"
 chmod 700 "$HOME/.termux/boot/HJ-Auto-Sender-Boot"
@@ -55,5 +64,5 @@ chmod 700 "$HOME/.termux/boot/HJ-Auto-Sender-Boot"
 echo ""
 echo "Setup complete."
 echo "Install/open Termux:Widget, then add its widget to the Android home screen."
-echo "The HJ-Auto-Sender shortcut will appear there."
+echo "Shortcuts installed: HJ-Auto-Sender, HJ-Auto-Sender-Pause, HJ-Auto-Sender-Resume, HJ-Auto-Sender-Stop, HJ-Auto-Sender-Status."
 echo "Telegram: the first run will ask for login. Later runs reuse the saved session."
