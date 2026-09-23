@@ -57,6 +57,70 @@ const fileSession = fs.existsSync(SESSION_FILE)
 const envSession = (process.env.TELEGRAM_SESSION || "").trim();
 const savedSession = envSession || fileSession;
 
+let client = null;
+let telegramConnectionPromise = null;
+
+function validateTelegramConfig() {
+    const problems = [];
+
+    if ((!process.env.API_ID && !process.env.TELEGRAM_API_ID) || !Number.isInteger(API_ID) || API_ID <= 0) {
+        problems.push("API_ID / TELEGRAM_API_ID is missing or not numeric");
+    }
+    if (!API_HASH) {
+        problems.push("API_HASH / TELEGRAM_API_HASH is missing");
+    }
+    if (!process.env.CHANNEL_ID || !Number.isInteger(CHANNEL_ID) || CHANNEL_ID === 0) {
+        problems.push("CHANNEL_ID is missing or not numeric");
+    }
+    if (!savedSession) {
+        problems.push("TELEGRAM_SESSION is missing");
+    }
+
+    return problems;
+}
+
+async function connectTelegram() {
+    const problems = validateTelegramConfig();
+    if (problems.length) {
+        throw new Error("Telegram configuration error: " + problems.join("; "));
+    }
+
+    if (!client) {
+        console.log(
+            "Telegram session source:",
+            envSession ? "environment" : (fileSession ? "file" : "missing")
+        );
+
+        client = new TelegramClient(
+            new StringSession(savedSession),
+            API_ID,
+            API_HASH,
+            { connectionRetries: 5 }
+        );
+    }
+
+    console.log("🔄 Connecting to Telegram...");
+    await client.connect();
+
+    if (!(await client.isUserAuthorized())) {
+        throw new Error("❌ Telegram session is not authorized.");
+    }
+
+    console.log("✅ Telegram session connected!");
+    return client;
+}
+
+async function ensureTelegramConnected() {
+    if (!telegramConnectionPromise) {
+        telegramConnectionPromise = connectTelegram().catch((error) => {
+            telegramConnectionPromise = null;
+            throw error;
+        });
+    }
+
+    return telegramConnectionPromise;
+}
+
 // Premium/VIP media is issued as a short-lived signed ticket. The signing
 // secret never reaches the browser.
 const MEDIA_TICKET_TTL_MS = 2 * 60 * 60 * 1000;
@@ -752,8 +816,7 @@ async function streamMedia(req, res, targetMessage) {
 }
 
 async function startServer() {
-    await ensureTelegramConnected();
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
         console.log("\n======================================");
         console.log("🚀 HJ GROUPS STREAM SERVER");
         console.log("======================================");
@@ -761,6 +824,17 @@ async function startServer() {
         console.log(`🎵 http://localhost:${PORT}/audio/message/7`);
         console.log("======================================\n");
     });
+
+    // Do not crash the HTTP service when Telegram authentication is temporarily
+    // invalid. Render/Vercel can keep the service healthy while media endpoints
+    // retry the connection on demand.
+    try {
+        await ensureTelegramConnected();
+    } catch (error) {
+        console.error("⚠️ Telegram startup connection failed; media requests will retry:", error?.message || error);
+    }
+
+    return server;
 }
 
 if (require.main === module) {
