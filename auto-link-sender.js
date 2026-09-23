@@ -234,6 +234,11 @@ async function reconnectWithBackoff() {
     }
 
     try {
+      // Force a fresh MTProto connection after a failed send. This is
+      // important when the library still reports a stale "connected" flag.
+      if (client) {
+        try { await client.disconnect(); } catch (_) {}
+      }
       await ensureTelegramConnected();
       return true;
     } catch (err) {
