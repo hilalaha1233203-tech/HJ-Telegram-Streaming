@@ -382,6 +382,233 @@ async function ensureTelegramConnected() {
     return telegramConnectionPromise;
 }
 
+
+const SUPABASE_URL = String(
+    process.env.SUPABASE_URL || "https://yajkfglagnyvenddyvok.supabase.co"
+).replace(/\/+$/, "");
+
+const SUPABASE_PUBLISHABLE_KEY = String(
+    process.env.SUPABASE_PUBLISHABLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    "sb_publishable_-cZxyr6HeB8H-dXNTUfNww_74XzTM6E"
+).trim();
+
+const MEDIA_TICKET_TTL_SECONDS = Math.max(
+    30,
+    Math.min(300, Number(process.env.MEDIA_TICKET_TTL_SECONDS) || 60)
+);
+
+const MEDIA_TICKET_SECRET = String(
+    process.env.MEDIA_TICKET_SECRET || API_HASH
+).trim();
+
+const mediaAccessCache = new Map();
+
+function normalizeAccessTypes(value) {
+    if (Array.isArray(value)) return value.map(String).map((item) => item.trim().toLowerCase()).filter(Boolean);
+
+    const raw = String(value || "").trim();
+    if (!raw) return ["free"];
+
+    if (raw.startsWith("[") || raw.startsWith("{")) {
+        try {
+            const parsed = JSON.parse(raw);
+            const result = normalizeAccessTypes(parsed);
+            if (result.length) return result;
+        } catch {}
+    }
+
+    return raw
+        .split(/[+,\\s]+/)
+        .map((item) => item.trim().toLowerCase())
+        .filter((item) => ["free", "vip", "premium", "ads"].includes(item));
+}
+
+function requiresProtectedAccess(accessType) {
+    const types = normalizeAccessTypes(accessType);
+    return !types.includes("free") &&
+        !types.includes("ads") &&
+        (types.includes("premium") || types.includes("vip"));
+}
+
+function mediaTableFor(type) {
+    if (type === "audio") return { table: "episodes", idColumn: "telegram_message_id", select: "id,story_id,access_type,available" };
+    if (type === "video") return { table: "video_episodes", idColumn: "telegram_message_id", select: "id,video_story_id,access_type,available" };
+    if (type === "document") return { table: "books", idColumn: "telegram_message_id", select: "id,access_type,available" };
+    return null;
+}
+
+async function fetchContentRow(type, messageId) {
+    const config = mediaTableFor(type);
+    if (!config) return null;
+
+    const key = type + ":" + messageId;
+    const cached = mediaAccessCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.row;
+
+    const params = new URLSearchParams({
+        select: config.select,
+        [config.idColumn]: "eq." + messageId,
+        limit: "1",
+    });
+
+    const response = await fetch(
+        SUPABASE_URL + "/rest/v1/" + config.table + "?" + params.toString(),
+        {
+            headers: {
+                apikey: SUPABASE_PUBLISHABLE_KEY,
+                Authorization: "Bearer " + SUPABASE_PUBLISHABLE_KEY,
+                Accept: "application/json",
+            },
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error("Supabase content lookup failed: HTTP " + response.status);
+    }
+
+    const rows = await response.json();
+    const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
+    mediaAccessCache.set(key, { row, expiresAt: Date.now() + 60_000 });
+    return row;
+}
+
+async function fetchSupabaseUser(authHeader) {
+    if (!authHeader || !/^Bearer\\s+\\S+/i.test(authHeader)) return null;
+
+    const response = await fetch(SUPABASE_URL + "/auth/v1/user", {
+        headers: {
+            Authorization: authHeader,
+            apikey: SUPABASE_PUBLISHABLE_KEY,
+        },
+    });
+
+    if (!response.ok) return null;
+    return await response.json();
+}
+
+async function fetchUserPurchases(authHeader, userId) {
+    const params = new URLSearchParams({
+        select: "story_id,product_type,expires_at",
+        user_id: "eq." + userId,
+        limit: "200",
+    });
+
+    const response = await fetch(
+        SUPABASE_URL + "/rest/v1/purchases?" + params.toString(),
+        {
+            headers: {
+                Authorization: authHeader,
+                apikey: SUPABASE_PUBLISHABLE_KEY,
+                Accept: "application/json",
+            },
+        }
+    );
+
+    if (!response.ok) return [];
+    const rows = await response.json();
+    const now = Date.now();
+
+    return (Array.isArray(rows) ? rows : []).filter((purchase) => {
+        if (!purchase || purchase.story_id === null || purchase.story_id === undefined) return false;
+        if (!purchase.expires_at) return true;
+        const expiry = Date.parse(purchase.expires_at);
+        return Number.isFinite(expiry) && expiry > now;
+    });
+}
+
+function purchaseMatchesContent(type, row, purchases) {
+    const ids = [];
+
+    if (type === "audio") {
+        ids.push(row?.story_id, row?.story_id == null ? null : "tg-story-" + row.story_id);
+    } else if (type === "video") {
+        ids.push(row?.video_story_id, row?.video_story_id == null ? null : "tg-video-" + row.video_story_id);
+    } else if (type === "document") {
+        ids.push(row?.id, row?.id == null ? null : "tg-book-" + row.id);
+    }
+
+    const candidates = new Set(ids.filter((value) => value !== null && value !== undefined).map(String));
+    return purchases.some((purchase) => candidates.has(String(purchase.story_id)));
+}
+
+async function authorizeProtectedContent(req, type, messageId) {
+    const row = await fetchContentRow(type, messageId);
+    if (!row || !requiresProtectedAccess(row.access_type)) {
+        return { allowed: true, row, user: null };
+    }
+
+    const authHeader = String(req.headers.authorization || "");
+    const user = await fetchSupabaseUser(authHeader);
+    if (!user?.id) {
+        return { allowed: false, status: 401, row, user: null };
+    }
+
+    if (String(user.email || "").toLowerCase() === "hilalaha1233203@gmail.com") {
+        return { allowed: true, row, user };
+    }
+
+    const purchases = await fetchUserPurchases(authHeader, user.id);
+    return {
+        allowed: purchaseMatchesContent(type, row, purchases),
+        status: 403,
+        row,
+        user,
+    };
+}
+
+function signMediaTicket(type, messageId, userId, expiresAt) {
+    const payload = type + "|" + messageId + "|" + userId + "|" + expiresAt;
+    return crypto.createHmac("sha256", MEDIA_TICKET_SECRET).update(payload).digest("hex");
+}
+
+function verifyMediaTicket(type, messageId, req) {
+    const expiresAt = Number(req.query.expires);
+    const token = String(req.query.token || "");
+    const userId = String(req.query.user || "");
+
+    if (!Number.isInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) return false;
+    if (!/^[a-f0-9]{64}$/i.test(token) || !userId) return false;
+
+    const expected = signMediaTicket(type, messageId, userId, expiresAt);
+    return crypto.timingSafeEqual(
+        Buffer.from(token, "hex"),
+        Buffer.from(expected, "hex")
+    );
+}
+
+function publicBaseUrl(req) {
+    const forwarded = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    const protocol = forwarded || req.protocol || "https";
+    const host = String(req.get("host") || "").trim();
+    return protocol + "://" + host;
+}
+
+async function guardDirectMediaRoute(req, res, type, messageId) {
+    try {
+        const access = await authorizeProtectedContent(req, type, messageId);
+        if (!access.row || !requiresProtectedAccess(access.row.access_type)) return false;
+
+        if (!access.allowed) {
+            if (access.status === 401) {
+                res.status(401).send("Protected media requires login.");
+            } else {
+                res.status(403).send("Protected media access denied.");
+            }
+            return true;
+        }
+
+        // A protected file must only be served through the short-lived ticket URL.
+        res.status(403).send("Protected media requires a secure media ticket.");
+        return true;
+    } catch (error) {
+        console.error("Protected media guard error:", error);
+        res.status(503).send("Protected media access check failed.");
+        return true;
+    }
+}
+
+
 app.get('/favicon.ico', (req, res) => {
     res.status(204).end();
 });
@@ -584,6 +811,7 @@ function setMediaHeaders(res, targetMessage) {
 app.head('/audio/message/:messageId', async (req, res) => {
     try {
         const messageId = Number(req.params.messageId);
+        if (await guardDirectMediaRoute(req, res, 'audio', messageId)) return;
         const access = await inspectMediaAccess(req, 'audio', messageId);
         if (!access.ok) return sendAccessError(res, access);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
@@ -603,6 +831,7 @@ app.head('/audio/message/:messageId', async (req, res) => {
 app.head('/video/message/:messageId', async (req, res) => {
     try {
         const messageId = Number(req.params.messageId);
+        if (await guardDirectMediaRoute(req, res, 'video', messageId)) return;
         const access = await inspectMediaAccess(req, 'video', messageId);
         if (!access.ok) return sendAccessError(res, access);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
@@ -622,6 +851,7 @@ app.head('/video/message/:messageId', async (req, res) => {
 app.head('/document/message/:messageId', async (req, res) => {
     try {
         const messageId = Number(req.params.messageId);
+        if (await guardDirectMediaRoute(req, res, 'document', messageId)) return;
         const access = await inspectMediaAccess(req, 'document', messageId);
         if (!access.ok) return sendAccessError(res, access);
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).end();
@@ -638,11 +868,100 @@ app.head('/document/message/:messageId', async (req, res) => {
     }
 });
 
+// Protected media ticket endpoint. The browser receives only a short-lived
+// signed URL after the Supabase login/purchase check succeeds.
+app.get('/media-ticket/:type/message/:messageId', async (req, res) => {
+    const type = String(req.params.type || '').toLowerCase();
+    const messageId = Number(req.params.messageId);
+
+    if (!['audio', 'video', 'document'].includes(type) ||
+        !Number.isInteger(messageId) || messageId <= 0) {
+        return res.status(400).json({ error: 'Invalid media ticket request' });
+    }
+
+    try {
+        const access = await authorizeProtectedContent(req, type, messageId);
+
+        if (!access.row) return res.status(404).json({ error: 'Media record not found' });
+        if (!requiresProtectedAccess(access.row.access_type)) {
+            return res.status(400).json({ error: 'Media is not protected' });
+        }
+        if (!access.allowed) {
+            return res.status(access.status || 403).json({
+                error: access.status === 401 ? 'Please sign in to access premium content.' : 'Premium access is required.',
+            });
+        }
+
+        const authUser = access.user;
+        const expiresAt = Math.floor(Date.now() / 1000) + MEDIA_TICKET_TTL_SECONDS;
+        const userId = String(authUser.id);
+        const token = signMediaTicket(type, messageId, userId, expiresAt);
+        const url = publicBaseUrl(req) +
+            '/' + type + '/secure-message/' + encodeURIComponent(messageId) +
+            '?expires=' + expiresAt +
+            '&user=' + encodeURIComponent(userId) +
+            '&token=' + token;
+
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({ url, expires_at: expiresAt });
+    } catch (error) {
+        console.error("Media ticket error:", error);
+        return res.status(503).json({ error: 'Unable to verify protected media access.' });
+    }
+});
+
+function registerSecureMediaRoutes(type, routePrefix) {
+    app.head('/' + type + '/secure-message/:messageId', async (req, res) => {
+        const messageId = Number(req.params.messageId);
+        if (!Number.isInteger(messageId) || messageId <= 0 ||
+            !verifyMediaTicket(type, messageId, req)) {
+            return res.status(401).end();
+        }
+
+        try {
+            const telegram = await ensureTelegramConnected();
+            const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
+            if (!targetMessage || !targetMessage.file) return res.status(404).end();
+            setMediaHeaders(res, targetMessage);
+            return res.status(200).end();
+        } catch (error) {
+            console.error("Secure HEAD " + type + " error:", error);
+            return res.status(500).end();
+        }
+    });
+
+    app.get('/' + type + '/secure-message/:messageId', async (req, res) => {
+        const messageId = Number(req.params.messageId);
+        if (!Number.isInteger(messageId) || messageId <= 0 ||
+            !verifyMediaTicket(type, messageId, req)) {
+            return res.status(401).send('Invalid or expired media ticket');
+        }
+
+        try {
+            const telegram = await ensureTelegramConnected();
+            const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
+            if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
+
+            setMediaHeaders(res, targetMessage);
+            return await streamMedia(req, res, targetMessage);
+        } catch (error) {
+            console.error("Secure " + type + " route error:", error);
+            if (!res.headersSent) return res.status(500).send('Secure media streaming failed');
+            return res.destroy(error);
+        }
+    });
+}
+
+registerSecureMediaRoutes('audio', 'audio');
+registerSecureMediaRoutes('video', 'video');
+registerSecureMediaRoutes('document', 'document');
+
 // Deliberately no /download/message/:messageId route.
 app.get('/audio/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+        if (await guardDirectMediaRoute(req, res, 'audio', messageId)) return;
 
         const ticket = String(req.query.ticket || '').trim();
         const access = await inspectMediaAccess(req, 'audio', messageId);
@@ -671,6 +990,7 @@ app.get('/video/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+        if (await guardDirectMediaRoute(req, res, 'video', messageId)) return;
 
         const ticket = String(req.query.ticket || '').trim();
         const access = await inspectMediaAccess(req, 'video', messageId);
@@ -693,6 +1013,7 @@ app.get('/document/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
         if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+        if (await guardDirectMediaRoute(req, res, 'document', messageId)) return;
 
         const ticket = String(req.query.ticket || '').trim();
         const access = await inspectMediaAccess(req, 'document', messageId);
