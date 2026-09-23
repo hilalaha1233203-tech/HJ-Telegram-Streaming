@@ -71,7 +71,7 @@ const MEDIA_TICKET_SECRET = String(
 const SUPABASE_URL = String(
     process.env.SUPABASE_URL ||
     'https://yajkfglagnyvenddyvok.supabase.co'
-).replace(/\\/$/, '');
+).replace(/\/$/, '');
 
 const SUPABASE_KEY = String(
     process.env.SUPABASE_PUBLISHABLE_KEY ||
