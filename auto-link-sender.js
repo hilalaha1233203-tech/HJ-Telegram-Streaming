@@ -498,9 +498,11 @@ async function run(state) {
     if (stopped) break;
 
     const start = state.currentStart;
-    const end = state.currentEnd;
+    const end = state.lastMessageId !== null
+      ? Math.min(state.currentEnd, state.lastMessageId)
+      : state.currentEnd;
 
-    if (state.lastMessageId !== null && end > state.lastMessageId) {
+    if (state.lastMessageId !== null && start > state.lastMessageId) {
       state.status = "completed";
       saveState(state);
       log("The configured final message ID was reached.");
@@ -556,7 +558,7 @@ async function run(state) {
   }
 
   if (stopped) {
-    state.status = "paused";
+    if (state.status !== "stopped") state.status = "paused";
     saveState(state);
     log("Saved. Next batch remains " + state.currentStart + "-" + state.currentEnd + ".");
   }
