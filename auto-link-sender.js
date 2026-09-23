@@ -15,6 +15,7 @@ const ROOT = __dirname;
 const SESSION_FILE = path.join(ROOT, "telegram-auto-link-session.txt");
 const STATE_FILE = path.join(ROOT, "auto-link-sender-state.json");
 const LOG_FILE = path.join(ROOT, "auto-link-sender.log");
+const CONFIG_FILE = path.join(ROOT, "auto-link-sender-config.json");
 
 const DEFAULT_BATCH_SIZE = Number(process.env.AUTO_BATCH_SIZE || 5);
 const DEFAULT_DELAY_SECONDS = Number(process.env.AUTO_DELAY_SECONDS || 600);
@@ -93,6 +94,22 @@ function formatTime(seconds) {
   s %= 60;
   if (h > 0) return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
   return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+function loadConfig() {
+  if (!fs.existsSync(CONFIG_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+  } catch (err) {
+    log("Could not read config file: " + err.message);
+    return {};
+  }
+}
+
+function saveConfig(config) {
+  const tmp = CONFIG_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), "utf8");
+  fs.renameSync(tmp, CONFIG_FILE);
 }
 
 function loadState() {
@@ -391,25 +408,31 @@ async function createNew() {
   );
   const parsed = parseRangeLink(rawLink);
 
-  const botInput = await ask(
-    "Target third-party bot username (example @my_bot): "
-  );
-  const botUsername = await resolveBot(botInput);
+  const config = loadConfig();
+  let botUsername = normalizeBotUsername(config.targetBot || process.env.AUTO_TARGET_BOT || "");
 
-  const batchRaw = await ask(
-    "Batch size [" + DEFAULT_BATCH_SIZE + "]: "
-  );
-  const batchSize = batchRaw.trim() ? Number(batchRaw.trim()) : DEFAULT_BATCH_SIZE;
+  if (!botUsername) {
+    const botInput = await ask(
+      "Target third-party bot username (example @my_bot): "
+    );
+    botUsername = await resolveBot(botInput);
+    config.targetBot = botUsername;
+  } else {
+    botUsername = await resolveBot(botUsername);
+  }
 
-  const delayRaw = await ask(
-    "Delay between links in seconds [" + DEFAULT_DELAY_SECONDS + "]: "
-  );
-  const delaySeconds = delayRaw.trim() ? Number(delayRaw.trim()) : DEFAULT_DELAY_SECONDS;
+  const batchSize = Number(config.batchSize || DEFAULT_BATCH_SIZE);
+  const delaySeconds = Number(config.delaySeconds || DEFAULT_DELAY_SECONDS);
 
   const lastRaw = await ask(
     "Last message ID (optional; Enter = run until stopped): "
   );
   const lastMessageId = lastRaw.trim() ? Number(lastRaw.trim()) : null;
+
+  if (!config.targetBot) config.targetBot = botUsername;
+  config.batchSize = batchSize;
+  config.delaySeconds = delaySeconds;
+  saveConfig(config);
 
   if (!Number.isInteger(batchSize) || batchSize < 1) {
     throw new Error("Batch size must be a positive integer.");
@@ -439,8 +462,20 @@ async function main() {
     validateConfig();
     await loginTelegram();
 
-    const resumed = await resumeExisting();
-    if (!resumed) await createNew();
+    const autoResume = process.argv.includes("--auto-resume");
+
+    if (autoResume) {
+      const state = loadState();
+      if (!state) {
+        log("No saved auto-sender job found at boot; nothing to resume.");
+      } else {
+        state.targetBot = await resolveBot(state.targetBot);
+        await run(state);
+      }
+    } else {
+      const resumed = await resumeExisting();
+      if (!resumed) await createNew();
+    }
   } catch (err) {
     log("ERROR: " + err.message);
     process.exitCode = 1;
