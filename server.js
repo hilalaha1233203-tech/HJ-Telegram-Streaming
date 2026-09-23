@@ -58,9 +58,8 @@ const envSession = (process.env.TELEGRAM_SESSION || "").trim();
 const savedSession = envSession || fileSession;
 
 // Premium/VIP media is issued as a short-lived signed ticket. The signing
-// secret is never shipped to the browser; use the configured secret first,
-// then the existing Telegram session/API hash as a stable deployment secret.
-const MEDIA_TICKET_TTL_MS = 2 * 60 * 60 * 1000;
+// secret never reaches the browser.
+const MEDIA_TICKET_TTL_MS = 5 * 60 * 1000;
 const MEDIA_TICKET_SECRET = String(
     process.env.MEDIA_TICKET_SECRET ||
     process.env.TELEGRAM_SESSION ||
@@ -71,7 +70,7 @@ const MEDIA_TICKET_SECRET = String(
 const SUPABASE_URL = String(
     process.env.SUPABASE_URL ||
     'https://yajkfglagnyvenddyvok.supabase.co'
-).replace(/\/$/, '');
+).replace(/\/+$/, '');
 
 const SUPABASE_KEY = String(
     process.env.SUPABASE_PUBLISHABLE_KEY ||
@@ -84,9 +83,13 @@ const mediaPolicyCache = new Map();
 const MEDIA_POLICY_TTL_MS = 30_000;
 
 function parseAccessTypes(raw) {
-    if (Array.isArray(raw)) return raw.map(String).map((x) => x.trim().toLowerCase()).filter(Boolean);
+    if (Array.isArray(raw)) {
+        return raw.map(String).map((x) => x.trim().toLowerCase()).filter(Boolean);
+    }
+
     const text = String(raw ?? '').trim();
     if (!text) return ['free'];
+
     if (text.startsWith('[')) {
         try {
             const parsed = JSON.parse(text);
@@ -95,12 +98,18 @@ function parseAccessTypes(raw) {
             }
         } catch {}
     }
-    return [text.toLowerCase()];
+
+    return text
+        .split(/[+,\s]+/)
+        .map((x) => x.trim().toLowerCase())
+        .filter((x) => ['free', 'vip', 'premium', 'ads'].includes(x));
 }
 
 function isProtectedPolicy(row) {
     const types = parseAccessTypes(row?.access_type);
-    return types.includes('premium') || types.includes('vip');
+    return !types.includes('free') &&
+        !types.includes('ads') &&
+        (types.includes('premium') || types.includes('vip'));
 }
 
 async function supabaseJson(pathname, authHeader = '') {
@@ -113,6 +122,7 @@ async function supabaseJson(pathname, authHeader = '') {
     const response = await fetch(SUPABASE_URL + pathname, { headers });
     let payload = null;
     try { payload = await response.json(); } catch {}
+
     if (!response.ok) {
         const error = new Error(
             'Supabase HTTP ' + response.status +
@@ -136,10 +146,14 @@ async function lookupMediaPolicy(kind, messageId) {
                 ? 'video_episodes'
                 : 'books';
 
-    const idField = 'telegram_message_id';
+    const select =
+        kind === 'video'
+            ? 'id,video_story_id,access_type,available'
+            : 'id,story_id,access_type,available';
+
     const params = new URLSearchParams({
-        select: 'id,story_id,access_type,available',
-        [idField]: 'eq.' + String(messageId),
+        select,
+        telegram_message_id: 'eq.' + String(messageId),
         limit: '1',
     });
 
@@ -157,7 +171,7 @@ async function lookupMediaPolicy(kind, messageId) {
 }
 
 async function getSupabaseUser(authHeader) {
-    if (!authHeader) return null;
+    if (!authHeader || !/^Bearer\s+\S+/i.test(authHeader)) return null;
     try {
         return await supabaseJson('/auth/v1/user', authHeader);
     } catch {
@@ -165,33 +179,42 @@ async function getSupabaseUser(authHeader) {
     }
 }
 
-async function hasPurchase(userId, entitlementId, authHeader) {
-    if (!userId || entitlementId === null || entitlementId === undefined) return false;
+async function hasPurchaseForContent(userId, kind, row, authHeader) {
+    if (!userId) return false;
+
+    const candidateIds =
+        kind === 'audio'
+            ? [row?.story_id, row?.story_id == null ? null : 'tg-story-' + row.story_id]
+            : kind === 'video'
+                ? [row?.video_story_id, row?.video_story_id == null ? null : 'tg-video-' + row.video_story_id]
+                : [row?.id, row?.id == null ? null : 'tg-book-' + row.id];
+
+    const ids = new Set(
+        candidateIds
+            .filter((value) => value !== null && value !== undefined)
+            .map(String)
+    );
+    if (!ids.size) return false;
 
     const params = new URLSearchParams({
-        select: 'story_id,expires_at',
+        select: 'story_id,product_type,expires_at',
         user_id: 'eq.' + String(userId),
-        story_id: 'eq.' + String(entitlementId),
-        limit: '20',
+        limit: '200',
     });
 
-    try {
-        const rows = await supabaseJson('/rest/v1/purchases?' + params.toString(), authHeader);
-        const now = Date.now();
-        return Array.isArray(rows) && rows.some((purchase) => {
-            if (!purchase) return false;
-            if (!purchase.expires_at) return true;
-            const expiry = Date.parse(purchase.expires_at);
-            return Number.isFinite(expiry) && expiry > now;
-        });
-    } catch (error) {
-        console.warn('Purchase lookup failed:', error?.message || error);
-        throw error;
-    }
+    const rows = await supabaseJson('/rest/v1/purchases?' + params.toString(), authHeader);
+    const now = Date.now();
+
+    return (Array.isArray(rows) ? rows : []).some((purchase) => {
+        if (!purchase || !ids.has(String(purchase.story_id))) return false;
+        if (!purchase.expires_at) return true;
+        const expiry = Date.parse(purchase.expires_at);
+        return Number.isFinite(expiry) && expiry > now;
+    });
 }
 
 function createMediaTicket(kind, messageId, userId) {
-    if (!MEDIA_TICKET_SECRET) throw new Error('MEDIA_TICKET_SECRET is not configured');
+    if (!MEDIA_TICKET_SECRET) throw new Error('Media ticket secret is not configured.');
 
     const payload = Buffer.from(JSON.stringify({
         kind,
@@ -238,26 +261,16 @@ function verifyMediaTicket(token, kind, messageId) {
 async function inspectMediaAccess(req, kind, messageId) {
     const ticket = String(req.query.ticket || '').trim();
     const ticketUser = verifyMediaTicket(ticket, kind, messageId);
-    if (ticketUser) {
-        return { ok: true, viaTicket: true, userId: ticketUser.userId };
-    }
+    if (ticketUser) return { ok: true, viaTicket: true, userId: ticketUser.userId };
 
     const policyResult = await lookupMediaPolicy(kind, messageId);
     if (policyResult.error) {
-        return {
-            ok: false,
-            status: 503,
-            error: 'Media access policy could not be verified.',
-        };
+        return { ok: false, status: 503, error: 'Media access policy could not be verified.' };
     }
 
     const row = policyResult.row;
     if (!row) {
-        return {
-            ok: false,
-            status: 404,
-            error: 'Media record was not found in the content database.',
-        };
+        return { ok: false, status: 404, error: 'Media record was not found in the content database.' };
     }
 
     if (row.available === false) {
@@ -278,27 +291,17 @@ async function inspectMediaAccess(req, kind, messageId) {
         return { ok: false, status: 401, error: 'Invalid or expired login session.' };
     }
 
-    const email = String(user.email || '').toLowerCase();
-    const isAdmin = email === ADMIN_EMAIL.toLowerCase();
-    if (isAdmin) {
+    if (String(user.email || '').toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
         return { ok: true, viaTicket: false, row, user };
     }
 
-    const entitlementId =
-        kind === 'document'
-            ? row.id
-            : row.story_id;
-
-    if (entitlementId === null || entitlementId === undefined) {
-        return { ok: false, status: 403, error: 'Premium entitlement is not configured for this media.' };
-    }
-
     try {
-        const purchased = await hasPurchase(user.id, entitlementId, authHeader);
+        const purchased = await hasPurchaseForContent(user.id, kind, row, authHeader);
         if (!purchased) {
             return { ok: false, status: 403, error: 'Premium purchase is required for this media.' };
         }
-    } catch {
+    } catch (error) {
+        console.warn('Purchase lookup failed:', error?.message || error);
         return { ok: false, status: 503, error: 'Premium entitlement could not be verified.' };
     }
 
@@ -318,296 +321,28 @@ function publicBaseUrl(req) {
     return host ? proto + '://' + host : '';
 }
 
-let client = null;
-let telegramConnectionPromise = null;
-
-function validateTelegramConfig() {
-    const problems = [];
-
-    if ((!process.env.API_ID && !process.env.TELEGRAM_API_ID) || !Number.isInteger(API_ID) || API_ID <= 0) {
-        problems.push("API_ID / TELEGRAM_API_ID is missing or not numeric");
-    }
-    if (!API_HASH) {
-        problems.push("API_HASH / TELEGRAM_API_HASH is missing");
-    }
-    if (!process.env.CHANNEL_ID || !Number.isInteger(CHANNEL_ID) || CHANNEL_ID === 0) {
-        problems.push("CHANNEL_ID is missing or not numeric");
-    }
-    if (!savedSession) {
-        problems.push("TELEGRAM_SESSION is missing");
-    }
-
-    return problems;
-}
-
-async function connectTelegram() {
-    const problems = validateTelegramConfig();
-    if (problems.length) {
-        throw new Error("Telegram configuration error: " + problems.join("; "));
-    }
-
-    if (!client) {
-        console.log(
-            "Telegram session source:",
-            envSession ? "environment" : (fileSession ? "file" : "missing")
-        );
-
-        client = new TelegramClient(
-            new StringSession(savedSession),
-            API_ID,
-            API_HASH,
-            { connectionRetries: 5 }
-        );
-    }
-
-    console.log("🔄 Connecting to Telegram...");
-    await client.connect();
-
-    if (!(await client.isUserAuthorized())) {
-        throw new Error("❌ Telegram session is not authorized.");
-    }
-
-    console.log("✅ Telegram session connected!");
-    return client;
-}
-
-async function ensureTelegramConnected() {
-    if (!telegramConnectionPromise) {
-        telegramConnectionPromise = connectTelegram().catch((error) => {
-            telegramConnectionPromise = null;
-            throw error;
-        });
-    }
-
-    return telegramConnectionPromise;
-}
-
-
-const SUPABASE_URL = String(
-    process.env.SUPABASE_URL || "https://yajkfglagnyvenddyvok.supabase.co"
-).replace(/\/+$/, "");
-
-const SUPABASE_PUBLISHABLE_KEY = String(
-    process.env.SUPABASE_PUBLISHABLE_KEY ||
-    process.env.SUPABASE_ANON_KEY ||
-    "sb_publishable_-cZxyr6HeB8H-dXNTUfNww_74XzTM6E"
-).trim();
-
-const MEDIA_TICKET_TTL_SECONDS = Math.max(
-    30,
-    Math.min(300, Number(process.env.MEDIA_TICKET_TTL_SECONDS) || 60)
-);
-
-const MEDIA_TICKET_SECRET = String(
-    process.env.MEDIA_TICKET_SECRET || API_HASH
-).trim();
-
-const mediaAccessCache = new Map();
-
-function normalizeAccessTypes(value) {
-    if (Array.isArray(value)) return value.map(String).map((item) => item.trim().toLowerCase()).filter(Boolean);
-
-    const raw = String(value || "").trim();
-    if (!raw) return ["free"];
-
-    if (raw.startsWith("[") || raw.startsWith("{")) {
-        try {
-            const parsed = JSON.parse(raw);
-            const result = normalizeAccessTypes(parsed);
-            if (result.length) return result;
-        } catch {}
-    }
-
-    return raw
-        .split(/[+,\\s]+/)
-        .map((item) => item.trim().toLowerCase())
-        .filter((item) => ["free", "vip", "premium", "ads"].includes(item));
-}
-
-function requiresProtectedAccess(accessType) {
-    const types = normalizeAccessTypes(accessType);
-    return !types.includes("free") &&
-        !types.includes("ads") &&
-        (types.includes("premium") || types.includes("vip"));
-}
-
-function mediaTableFor(type) {
-    if (type === "audio") return { table: "episodes", idColumn: "telegram_message_id", select: "id,story_id,access_type,available" };
-    if (type === "video") return { table: "video_episodes", idColumn: "telegram_message_id", select: "id,video_story_id,access_type,available" };
-    if (type === "document") return { table: "books", idColumn: "telegram_message_id", select: "id,access_type,available" };
-    return null;
-}
-
-async function fetchContentRow(type, messageId) {
-    const config = mediaTableFor(type);
-    if (!config) return null;
-
-    const key = type + ":" + messageId;
-    const cached = mediaAccessCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.row;
-
-    const params = new URLSearchParams({
-        select: config.select,
-        [config.idColumn]: "eq." + messageId,
-        limit: "1",
-    });
-
-    const response = await fetch(
-        SUPABASE_URL + "/rest/v1/" + config.table + "?" + params.toString(),
-        {
-            headers: {
-                apikey: SUPABASE_PUBLISHABLE_KEY,
-                Authorization: "Bearer " + SUPABASE_PUBLISHABLE_KEY,
-                Accept: "application/json",
-            },
-        }
-    );
-
-    if (!response.ok) {
-        throw new Error("Supabase content lookup failed: HTTP " + response.status);
-    }
-
-    const rows = await response.json();
-    const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-    mediaAccessCache.set(key, { row, expiresAt: Date.now() + 60_000 });
-    return row;
-}
-
-async function fetchSupabaseUser(authHeader) {
-    if (!authHeader || !/^Bearer\\s+\\S+/i.test(authHeader)) return null;
-
-    const response = await fetch(SUPABASE_URL + "/auth/v1/user", {
-        headers: {
-            Authorization: authHeader,
-            apikey: SUPABASE_PUBLISHABLE_KEY,
-        },
-    });
-
-    if (!response.ok) return null;
-    return await response.json();
-}
-
-async function fetchUserPurchases(authHeader, userId) {
-    const params = new URLSearchParams({
-        select: "story_id,product_type,expires_at",
-        user_id: "eq." + userId,
-        limit: "200",
-    });
-
-    const response = await fetch(
-        SUPABASE_URL + "/rest/v1/purchases?" + params.toString(),
-        {
-            headers: {
-                Authorization: authHeader,
-                apikey: SUPABASE_PUBLISHABLE_KEY,
-                Accept: "application/json",
-            },
-        }
-    );
-
-    if (!response.ok) return [];
-    const rows = await response.json();
-    const now = Date.now();
-
-    return (Array.isArray(rows) ? rows : []).filter((purchase) => {
-        if (!purchase || purchase.story_id === null || purchase.story_id === undefined) return false;
-        if (!purchase.expires_at) return true;
-        const expiry = Date.parse(purchase.expires_at);
-        return Number.isFinite(expiry) && expiry > now;
-    });
-}
-
-function purchaseMatchesContent(type, row, purchases) {
-    const ids = [];
-
-    if (type === "audio") {
-        ids.push(row?.story_id, row?.story_id == null ? null : "tg-story-" + row.story_id);
-    } else if (type === "video") {
-        ids.push(row?.video_story_id, row?.video_story_id == null ? null : "tg-video-" + row.video_story_id);
-    } else if (type === "document") {
-        ids.push(row?.id, row?.id == null ? null : "tg-book-" + row.id);
-    }
-
-    const candidates = new Set(ids.filter((value) => value !== null && value !== undefined).map(String));
-    return purchases.some((purchase) => candidates.has(String(purchase.story_id)));
-}
-
-async function authorizeProtectedContent(req, type, messageId) {
-    const row = await fetchContentRow(type, messageId);
-    if (!row || !requiresProtectedAccess(row.access_type)) {
-        return { allowed: true, row, user: null };
-    }
-
-    const authHeader = String(req.headers.authorization || "");
-    const user = await fetchSupabaseUser(authHeader);
-    if (!user?.id) {
-        return { allowed: false, status: 401, row, user: null };
-    }
-
-    if (String(user.email || "").toLowerCase() === "hilalaha1233203@gmail.com") {
-        return { allowed: true, row, user };
-    }
-
-    const purchases = await fetchUserPurchases(authHeader, user.id);
-    return {
-        allowed: purchaseMatchesContent(type, row, purchases),
-        status: 403,
-        row,
-        user,
-    };
-}
-
-function signMediaTicket(type, messageId, userId, expiresAt) {
-    const payload = type + "|" + messageId + "|" + userId + "|" + expiresAt;
-    return crypto.createHmac("sha256", MEDIA_TICKET_SECRET).update(payload).digest("hex");
-}
-
-function verifyMediaTicket(type, messageId, req) {
-    const expiresAt = Number(req.query.expires);
-    const token = String(req.query.token || "");
-    const userId = String(req.query.user || "");
-
-    if (!Number.isInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) return false;
-    if (!/^[a-f0-9]{64}$/i.test(token) || !userId) return false;
-
-    const expected = signMediaTicket(type, messageId, userId, expiresAt);
-    return crypto.timingSafeEqual(
-        Buffer.from(token, "hex"),
-        Buffer.from(expected, "hex")
-    );
-}
-
-function publicBaseUrl(req) {
-    const forwarded = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
-    const protocol = forwarded || req.protocol || "https";
-    const host = String(req.get("host") || "").trim();
-    return protocol + "://" + host;
-}
-
-async function guardDirectMediaRoute(req, res, type, messageId) {
+async function guardDirectMediaRoute(req, res, kind, messageId) {
     try {
-        const access = await authorizeProtectedContent(req, type, messageId);
-        if (!access.row || !requiresProtectedAccess(access.row.access_type)) return false;
-
-        if (!access.allowed) {
-            if (access.status === 401) {
-                res.status(401).send("Protected media requires login.");
-            } else {
-                res.status(403).send("Protected media access denied.");
-            }
+        const access = await inspectMediaAccess(req, kind, messageId);
+        if (!access.ok) {
+            sendAccessError(res, access);
             return true;
         }
 
-        // A protected file must only be served through the short-lived ticket URL.
-        res.status(403).send("Protected media requires a secure media ticket.");
-        return true;
+        if (access.viaTicket) return false;
+
+        if (isProtectedPolicy(access.row || {})) {
+            res.status(403).send('Protected media requires a secure media ticket.');
+            return true;
+        }
+
+        return false;
     } catch (error) {
-        console.error("Protected media guard error:", error);
-        res.status(503).send("Protected media access check failed.");
+        console.error('Protected media guard error:', error);
+        res.status(503).send('Protected media access check failed.');
         return true;
     }
 }
-
 
 app.get('/favicon.ico', (req, res) => {
     res.status(204).end();
@@ -646,51 +381,6 @@ app.get("/", (req, res) => {
 app.options('/telegram/messages', (req, res) => {
     // The global CORS middleware already sets the origin/header policy.
     res.status(204).end();
-});
-
-app.get('/media-ticket/:type/message/:messageId', async (req, res) => {
-    try {
-        const requestedType = String(req.params.type || '').toLowerCase();
-        const kind =
-            requestedType === 'audio'
-                ? 'audio'
-                : requestedType === 'video'
-                    ? 'video'
-                    : requestedType === 'document'
-                        ? 'document'
-                        : null;
-
-        const messageId = Number(req.params.messageId);
-        if (!kind || !Number.isInteger(messageId) || messageId <= 0) {
-            return res.status(400).json({ error: 'Invalid media ticket request.' });
-        }
-
-        const access = await inspectMediaAccess(req, kind, messageId);
-        if (!access.ok) return sendAccessError(res, access);
-
-        // Only protected media needs a ticket. Returning a direct public URL
-        // for free media preserves normal browser playback behaviour.
-        const isProtected = isProtectedPolicy(access.row || {});
-        const basePath = '/' + kind + '/message/' + encodeURIComponent(messageId);
-
-        if (!isProtected) {
-            return res.json({ url: publicBaseUrl(req) + basePath });
-        }
-
-        const userId = String(access.user?.id || access.userId || '').trim();
-        if (!userId) {
-            return res.status(401).json({ error: 'Login is required for premium/VIP media.' });
-        }
-
-        const ticket = createMediaTicket(kind, messageId, userId);
-        return res.json({
-            url: publicBaseUrl(req) + basePath + '?ticket=' + encodeURIComponent(ticket),
-            expires_at: new Date(Date.now() + MEDIA_TICKET_TTL_MS).toISOString(),
-        });
-    } catch (error) {
-        console.error('Media ticket error:', error);
-        return res.status(500).json({ error: 'Unable to issue a secure media ticket.' });
-    }
 });
 
 app.get('/telegram/messages', async (req, res) => {
@@ -880,27 +570,22 @@ app.get('/media-ticket/:type/message/:messageId', async (req, res) => {
     }
 
     try {
-        const access = await authorizeProtectedContent(req, type, messageId);
+        const access = await inspectMediaAccess(req, type, messageId);
 
-        if (!access.row) return res.status(404).json({ error: 'Media record not found' });
-        if (!requiresProtectedAccess(access.row.access_type)) {
+        if (!access.ok) return sendAccessError(res, access);
+        if (!access.row || !isProtectedPolicy(access.row)) {
             return res.status(400).json({ error: 'Media is not protected' });
         }
-        if (!access.allowed) {
-            return res.status(access.status || 403).json({
-                error: access.status === 401 ? 'Please sign in to access premium content.' : 'Premium access is required.',
-            });
+
+        const userId = String(access.user?.id || access.userId || '').trim();
+        if (!userId) {
+            return res.status(401).json({ error: 'Login is required for premium/VIP media.' });
         }
 
-        const authUser = access.user;
-        const expiresAt = Math.floor(Date.now() / 1000) + MEDIA_TICKET_TTL_SECONDS;
-        const userId = String(authUser.id);
-        const token = signMediaTicket(type, messageId, userId, expiresAt);
+        const token = createMediaTicket(type, messageId, userId);
         const url = publicBaseUrl(req) +
             '/' + type + '/secure-message/' + encodeURIComponent(messageId) +
-            '?expires=' + expiresAt +
-            '&user=' + encodeURIComponent(userId) +
-            '&token=' + token;
+            '?ticket=' + encodeURIComponent(token);
 
         res.setHeader('Cache-Control', 'no-store');
         return res.json({ url, expires_at: expiresAt });
@@ -952,9 +637,9 @@ function registerSecureMediaRoutes(type) {
     });
 }
 
-registerSecureMediaRoutes('audio', 'audio');
-registerSecureMediaRoutes('video', 'video');
-registerSecureMediaRoutes('document', 'document');
+registerSecureMediaRoutes('audio');
+registerSecureMediaRoutes('video');
+registerSecureMediaRoutes('document');
 
 // Deliberately no /download/message/:messageId route.
 app.get('/audio/message/:messageId', async (req, res) => {
