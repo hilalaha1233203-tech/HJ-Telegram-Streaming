@@ -35,6 +35,8 @@ Open Termux and run:
     cd HJ-Telegram-Streaming
     bash android/termux-setup.sh
 
+The setup script installs Node.js dependencies and, on the first Android setup, asks for API_ID and API_HASH once and writes them to the phone's local .env file. Do not paste these values into chat.
+
 If the repository is already present, the setup script updates it with git pull.
 
 Then install/open Termux:Widget once and add its widget/shortcut to the Android home screen.
