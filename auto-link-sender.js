@@ -197,7 +197,7 @@ async function loginTelegram() {
   const session = client.session.save();
   fs.writeFileSync(SESSION_FILE, session + "\n", "utf8");
   log("Telegram user session saved to " + path.basename(SESSION_FILE) + ".");
-  log("Keep telegram-session.txt private.");
+  log("Keep telegram-auto-link-session.txt private.");
 }
 
 async function resolveBot(username) {
