@@ -18,6 +18,31 @@ fi
 cd "$HOME/HJ-Telegram-Streaming"
 npm install
 
+if [ ! -f "$HOME/HJ-Telegram-Streaming/.env" ]; then
+  echo ""
+  echo "Telegram API credentials are needed once for this phone."
+  echo "Use the same API_ID and API_HASH already used by your HJ Telegram project."
+  printf "API_ID: "
+  read -r API_ID_INPUT
+  printf "API_HASH: "
+  read -r API_HASH_INPUT
+
+  if [ -z "$API_ID_INPUT" ] || [ -z "$API_HASH_INPUT" ]; then
+    echo "API_ID and API_HASH cannot be empty."
+    exit 1
+  fi
+
+  cat > "$HOME/HJ-Telegram-Streaming/.env" <<EOF
+API_ID=$API_ID_INPUT
+API_HASH=$API_HASH_INPUT
+AUTO_BATCH_SIZE=5
+AUTO_DELAY_SECONDS=600
+EOF
+
+  chmod 600 "$HOME/HJ-Telegram-Streaming/.env"
+  echo "Saved Telegram API settings locally."
+fi
+
 mkdir -p "$HOME/.shortcuts"
 mkdir -p "$HOME/.termux/boot"
 
