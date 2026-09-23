@@ -293,6 +293,7 @@ function createRun(parsed, botUsername, batchSize, delaySeconds, lastMessageId) 
 }
 
 async function run(state) {
+  setupControls();
   activeRun = state;
   stopped = false;
   paused = false;
@@ -452,7 +453,6 @@ async function main() {
 }
 
 if (require.main === module) {
-  setupControls();
   main();
 }
 
