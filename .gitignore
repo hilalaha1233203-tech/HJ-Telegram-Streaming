@@ -28,3 +28,4 @@ mtproto-user-test.js
 query_db*.js
 rewrite-telegram.js
 auto-link-sender-state.json
+telegram-auto-link-session.txt
