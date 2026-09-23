@@ -32,6 +32,7 @@ let previousInputRawMode = false;
 let reconnectPromise = null;
 
 const LOCK_FILE = path.join(ROOT, "auto-link-sender.lock");
+const CONTROL_FILE = path.join(ROOT, "auto-link-sender-control.txt");
 
 function stamp() {
   return new Date().toISOString();
@@ -130,6 +131,59 @@ function saveState(state) {
   state.updatedAt = stamp();
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
   fs.renameSync(tmp, STATE_FILE);
+}
+
+function clearControl() {
+  try {
+    if (fs.existsSync(CONTROL_FILE)) fs.unlinkSync(CONTROL_FILE);
+  } catch (err) {
+    log("Could not clear control file: " + err.message);
+  }
+}
+
+function readControl() {
+  try {
+    if (!fs.existsSync(CONTROL_FILE)) return "";
+    return fs.readFileSync(CONTROL_FILE, "utf8").trim().toUpperCase();
+  } catch (err) {
+    log("Could not read control file: " + err.message);
+    return "";
+  }
+}
+
+function consumeControl() {
+  const command = readControl();
+  if (!command) return "";
+  if (command === "PAUSE" || command === "RESUME" || command === "STOP") {
+    try { fs.unlinkSync(CONTROL_FILE); } catch (_) {}
+    return command;
+  }
+  clearControl();
+  return "";
+}
+
+function applyExternalControl(state) {
+  const command = consumeControl();
+  if (!command) return;
+
+  if (command === "PAUSE") {
+    paused = true;
+    state.status = "paused";
+    saveState(state);
+    log("Paused by external control. Current batch remains " + state.currentStart + "-" + state.currentEnd + ".");
+  } else if (command === "RESUME") {
+    paused = false;
+    stopped = false;
+    state.status = "running";
+    saveState(state);
+    log("Resumed by external control.");
+  } else if (command === "STOP") {
+    stopped = true;
+    paused = false;
+    state.status = "stopped";
+    saveState(state);
+    log("Stop requested by external control. Current batch remains " + state.currentStart + "-" + state.currentEnd + ".");
+  }
 }
 
 function clearState() {
@@ -381,7 +435,9 @@ async function waitControlled(seconds) {
   let remaining = Math.ceil(seconds);
 
   while (remaining > 0 && !stopped) {
+    if (activeRun) applyExternalControl(activeRun);
     while (paused && !stopped) {
+      if (activeRun) applyExternalControl(activeRun);
       await sleep(250);
     }
     if (stopped) break;
@@ -427,11 +483,20 @@ async function run(state) {
   activeRun = state;
   stopped = false;
   paused = false;
+  clearControl();
   saveState(state);
 
   console.log("\nControls: P=pause, R=resume, S=stop/save, Ctrl+C=stop/save\n");
 
   while (!stopped) {
+    applyExternalControl(state);
+    if (stopped) break;
+    while (paused && !stopped) {
+      applyExternalControl(state);
+      await sleep(250);
+    }
+    if (stopped) break;
+
     const start = state.currentStart;
     const end = state.currentEnd;
 
@@ -556,13 +621,20 @@ async function createNew() {
   const delayInput = (await ask(delayPrompt)).trim();
   const delaySeconds = Number(delayInput || savedDelaySeconds);
 
-  const configuredLast = process.env.AUTO_LAST_MESSAGE_ID || config.lastMessageId || "";
-  const lastMessageId = configuredLast ? Number(configuredLast) : null;
+  const savedLastMessageId = Number.isSafeInteger(Number(config.lastMessageId))
+    ? Number(config.lastMessageId)
+    : null;
+  const lastPrompt = savedLastMessageId !== null
+    ? "Stop message ID [" + savedLastMessageId + "] (blank = no limit): "
+    : "Stop message ID (blank = no limit): ";
+  const lastInput = (await ask(lastPrompt)).trim();
+  const lastMessageId = lastInput ? Number(lastInput) : null;
 
   config.targetBot = botUsername;
   config.batchSize = batchSize;
   config.delaySeconds = delaySeconds;
   if (lastMessageId !== null) config.lastMessageId = lastMessageId;
+  else delete config.lastMessageId;
   saveConfig(config);
 
   if (!Number.isInteger(batchSize) || batchSize < 1) {
