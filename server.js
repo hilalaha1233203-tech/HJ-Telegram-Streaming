@@ -910,7 +910,7 @@ app.get('/media-ticket/:type/message/:messageId', async (req, res) => {
     }
 });
 
-function registerSecureMediaRoutes(type, routePrefix) {
+function registerSecureMediaRoutes(type) {
     app.head('/' + type + '/secure-message/:messageId', async (req, res) => {
         const messageId = Number(req.params.messageId);
         if (!Number.isInteger(messageId) || messageId <= 0 ||
