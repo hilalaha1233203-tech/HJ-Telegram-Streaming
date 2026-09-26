@@ -937,18 +937,27 @@ async function buildEpubPreview(sourceBuffer, title, pageLimit) {
     if (!rootFile || !zip.file(rootFile)) throw new Error('EPUB package metadata is invalid.');
     const opfDir = rootFile.includes('/') ? rootFile.slice(0, rootFile.lastIndexOf('/') + 1) : '';
     const opfXml = await zip.file(rootFile).async('string');
+    const getXmlAttr = (tag, attr) => {
+        const match = String(tag || '').match(new RegExp('\\b' + attr + '\\s*=\\s*[\\\"\\\']([^\\\"\\\']+)[\\\"\\\']', 'i'));
+        return match ? match[1] : '';
+    };
     const manifest = new Map();
-    for (const match of opfXml.matchAll(/<item\b[^>]*\bid=[\"']([^\"']+)[\"'][^>]*\bhref=[\"']([^\"']+)[\"'][^>]*>/gi)) {
-        manifest.set(match[1], match[2]);
+    for (const match of opfXml.matchAll(/<item\b[^>]*>/gi)) {
+        const tag = match[0];
+        const id = getXmlAttr(tag, 'id');
+        const href = getXmlAttr(tag, 'href');
+        if (id && href) manifest.set(id, href);
     }
     const spine = [];
-    for (const match of opfXml.matchAll(/<itemref\b[^>]*\bidref=[\"']([^\"']+)[\"'][^>]*>/gi)) {
-        const href = manifest.get(match[1]);
+    for (const match of opfXml.matchAll(/<itemref\b[^>]*>/gi)) {
+        const idref = getXmlAttr(match[0], 'idref');
+        const href = manifest.get(idref);
         if (href) spine.push(href);
     }
     const chunks = [];
     for (const href of spine) {
-        const fileName = opfDir + decodeURIComponent(String(href).replace(/^\/+/, ''));
+        const cleanHref = String(href).split('#')[0].split('?')[0];
+        const fileName = opfDir + decodeURIComponent(cleanHref.replace(/^\/+/, ''));
         const file = zip.file(fileName);
         if (!file) continue;
         const text = stripMarkup(await file.async('string'));
@@ -956,12 +965,13 @@ async function buildEpubPreview(sourceBuffer, title, pageLimit) {
     }
     const combined = chunks.join('\n\n').trim();
     if (!combined) throw new Error('EPUB contains no readable text.');
-    const pageCount = Math.min(pageLimit, Math.max(1, Math.ceil(combined.length / 1400)));
+    const previewText = combined.slice(0, Math.max(1, pageLimit * 1400));
+    const pageCount = Math.min(pageLimit, Math.max(1, Math.ceil(previewText.length / 1400)));
     const pages = [];
     for (let index = 0; index < pageCount; index++) {
-        const start = Math.floor((combined.length * index) / pageCount);
-        const end = Math.floor((combined.length * (index + 1)) / pageCount);
-        pages.push(combined.slice(start, end).trim());
+        const start = index * 1400;
+        const end = Math.min(previewText.length, (index + 1) * 1400);
+        pages.push(previewText.slice(start, end).trim());
     }
     const out = new JSZip();
     out.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
