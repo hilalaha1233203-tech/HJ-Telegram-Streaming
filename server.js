@@ -142,6 +142,11 @@ const SUPABASE_KEY = String(
     'sb_publishable_-cZxyr6HeB8H-dXNTUfNww_74XzTM6E'
 ).trim();
 
+const HJ_WEB_BASE_URL = String(
+    process.env.HJ_WEB_BASE_URL ||
+    'https://hj-groups-website.getvoroa.com'
+).trim().replace(/\/+$/, '');
+
 const ADMIN_EMAIL = 'hilalaha1233203@gmail.com';
 const mediaPolicyCache = new Map();
 const MEDIA_POLICY_TTL_MS = 30_000;
@@ -172,7 +177,7 @@ function parseAccessTypes(raw) {
 function isProtectedPolicy(row) {
     const types = parseAccessTypes(row?.access_type);
     // Paid access always wins over legacy/accidental free or ads flags.
-    return types.includes('premium') || types.includes('vip');
+    return types.includes('premium') || types.includes('vip') || types.includes('ads');
 }
 
 async function supabaseJson(pathname, authHeader = '') {
@@ -211,8 +216,10 @@ async function lookupMediaPolicy(kind, messageId) {
 
     const select =
         kind === 'video'
-            ? 'id,video_story_id,access_type,available'
-            : 'id,story_id,access_type,available';
+            ? 'id,video_story_id,access_type,available,number'
+            : kind === 'audio'
+                ? 'id,story_id,access_type,available,episode_number,number'
+                : 'id,access_type';
 
     const params = new URLSearchParams({
         select,
@@ -230,6 +237,70 @@ async function lookupMediaPolicy(kind, messageId) {
         const value = { row: null, error };
         mediaPolicyCache.set(key, { value, expiresAt: Date.now() + 5_000 });
         return value;
+    }
+}
+
+const previewLimitCache = new Map();
+const PREVIEW_LIMIT_TTL_MS = 30_000;
+
+async function getEpisodePreviewLimit(kind) {
+    const key = kind === 'video' ? 'video_free_episodes' : 'audio_free_episodes';
+    const cached = previewLimitCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const params = new URLSearchParams({ select: key, id: 'eq.default', limit: '1' });
+    try {
+        const rows = await supabaseJson('/rest/v1/content_access_settings?' + params.toString());
+        const value = Math.max(0, Number(Array.isArray(rows) ? rows[0]?.[key] : 0) || 0);
+        previewLimitCache.set(key, { value, expiresAt: Date.now() + PREVIEW_LIMIT_TTL_MS });
+        return value;
+    } catch (error) {
+        console.warn('Preview limit lookup failed:', error?.statusCode || 'request_error');
+        previewLimitCache.set(key, { value: 0, expiresAt: Date.now() + 5_000 });
+        return 0;
+    }
+}
+
+function episodeNumberForPolicy(kind, row) {
+    return Number(kind === 'video' ? row?.number : (row?.number ?? row?.episode_number));
+}
+
+async function isFreeEpisodePreview(kind, row) {
+    if (!['audio', 'video'].includes(kind)) return false;
+    const types = parseAccessTypes(row?.access_type);
+    if (!types.some((type) => ['premium', 'vip', 'ads'].includes(type))) return false;
+    const number = episodeNumberForPolicy(kind, row);
+    if (!Number.isInteger(number) || number <= 0) return false;
+    const limit = await getEpisodePreviewLimit(kind);
+    return limit > 0 && number <= limit;
+}
+
+async function verifyWebEntitlement(authHeader, kind, row) {
+    if (!authHeader) return { ok: false, status: 401, error: 'Login is required for protected media.' };
+    const contentType = kind === 'document' ? 'book' : kind;
+    const contentId = Number(row?.id);
+    if (!Number.isInteger(contentId) || contentId <= 0) {
+        return { ok: false, status: 400, error: 'Media record is invalid.' };
+    }
+    try {
+        const response = await fetch(HJ_WEB_BASE_URL + '/api/shortener/access', {
+            method: 'POST',
+            headers: {
+                Authorization: authHeader,
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+            },
+            body: JSON.stringify({ contentType, contentId }),
+        });
+        let payload = null;
+        try { payload = await response.json(); } catch {}
+        if (response.ok && payload?.ok) return { ok: true, payload };
+        if (response.status === 401 || response.status === 403) {
+            return { ok: false, status: response.status, error: String(payload?.error || 'Temporary or paid access required.') };
+        }
+        return { ok: false, status: 503, error: 'Protected media entitlement could not be verified.' };
+    } catch (error) {
+        console.warn('HJ web entitlement lookup failed:', error?.code || 'request_error');
+        return { ok: false, status: 503, error: 'Protected media entitlement could not be verified.' };
     }
 }
 
@@ -344,9 +415,21 @@ async function inspectMediaAccess(req, kind, messageId) {
         return { ok: true, viaTicket: false, row };
     }
 
+    if (await isFreeEpisodePreview(kind, row)) {
+        return { ok: true, viaTicket: false, viaPreview: true, row };
+    }
+
     const authHeader = String(req.headers.authorization || '').trim();
     if (!authHeader) {
-        return { ok: false, status: 401, error: 'Login is required for premium/VIP media.' };
+        return { ok: false, status: 401, error: 'Login is required for protected media.' };
+    }
+
+    const accessTypes = parseAccessTypes(row.access_type);
+    if (accessTypes.includes('ads')) {
+        const entitlement = await verifyWebEntitlement(authHeader, kind, row);
+        if (!entitlement.ok) return entitlement;
+        const user = await getSupabaseUser(authHeader);
+        return { ok: true, viaTicket: false, row, user };
     }
 
     const user = await getSupabaseUser(authHeader);
@@ -364,7 +447,7 @@ async function inspectMediaAccess(req, kind, messageId) {
             return { ok: false, status: 403, error: 'Premium purchase is required for this media.' };
         }
     } catch (error) {
-        console.warn('Purchase lookup failed:', error?.message || error);
+        console.warn('Purchase lookup failed:', error?.statusCode || 'request_error');
         return { ok: false, status: 503, error: 'Premium entitlement could not be verified.' };
     }
 
@@ -393,6 +476,8 @@ async function guardDirectMediaRoute(req, res, kind, messageId) {
         }
 
         if (access.viaTicket) return false;
+
+        if (access.viaPreview) return false;
 
         if (isProtectedPolicy(access.row || {})) {
             res.status(403).send('Protected media requires a secure media ticket.');
