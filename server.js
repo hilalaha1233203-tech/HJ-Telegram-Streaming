@@ -783,6 +783,38 @@ app.get('/video/message/:messageId', async (req, res) => {
     }
 });
 
+app.get('/document/preview/message/:messageId', async (req, res) => {
+    const messageId = Number(req.params.messageId);
+    try {
+        if (!Number.isInteger(messageId) || messageId <= 0) return res.status(400).send('Invalid message id');
+        const limit = await getBookPreviewLimit();
+        if (limit <= 0) return res.status(403).send('Book preview is disabled.');
+        const policyResult = await lookupMediaPolicy('document', messageId);
+        if (policyResult.error) return res.status(503).send('Media access policy could not be verified.');
+        const row = policyResult.row;
+        if (!row) return res.status(404).send('Media record was not found in the content database.');
+        if (row.available === false) return res.status(403).send('This media is unavailable.');
+        if (!isProtectedPolicy(row)) return res.status(400).send('Media is not a protected book.');
+        const telegram = await ensureTelegramConnected();
+        const messages = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
+        const targetMessage = messages && messages[0];
+        if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
+        const preview = await buildBookPreview(targetMessage, limit);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Content-Disposition');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Content-Type', preview.contentType);
+        res.setHeader('Content-Disposition', 'inline');
+        res.setHeader('Content-Length', preview.body.length);
+        return res.status(200).send(preview.body);
+    } catch (error) {
+        console.error('Document preview route error:', error);
+        if (!res.headersSent) res.status(503).send('Book preview could not be generated.');
+        else res.destroy(error);
+    }
+});
+
 app.get('/document/message/:messageId', async (req, res) => {
     const messageId = Number(req.params.messageId);
     try {
@@ -802,6 +834,173 @@ app.get('/document/message/:messageId', async (req, res) => {
     }
 });
 
+const previewDocumentCache = new Map();
+const PREVIEW_CACHE_TTL_MS = 10 * 60 * 1000;
+const PREVIEW_CACHE_MAX_ITEMS = 3;
+const PREVIEW_PAGE_LIMIT = 50;
+
+async function downloadTelegramFileBuffer(targetMessage) {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of (await ensureTelegramConnected()).iterDownload(targetMessage, { offset: 0 })) {
+        const buffer = Buffer.from(chunk);
+        total += buffer.length;
+        if (total > 120 * 1024 * 1024) throw new Error('Preview source is too large.');
+        chunks.push(buffer);
+    }
+    return Buffer.concat(chunks);
+}
+
+function cachePreview(key, value) {
+    previewDocumentCache.set(key, { value, expiresAt: Date.now() + PREVIEW_CACHE_TTL_MS });
+    while (previewDocumentCache.size > PREVIEW_CACHE_MAX_ITEMS) {
+        const oldest = previewDocumentCache.keys().next().value;
+        previewDocumentCache.delete(oldest);
+    }
+}
+
+function getCachedPreview(key) {
+    const entry = previewDocumentCache.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+        previewDocumentCache.delete(key);
+        return null;
+    }
+    return entry.value;
+}
+
+async function getBookPreviewLimit() {
+    const cached = previewLimitCache.get('book_free_pages');
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const params = new URLSearchParams({ select: 'book_free_pages', id: 'eq.default', limit: '1' });
+    try {
+        const rows = await supabaseJson('/rest/v1/content_access_settings?' + params.toString());
+        const value = Math.max(0, Math.min(PREVIEW_PAGE_LIMIT, Number(Array.isArray(rows) ? rows[0]?.book_free_pages : 0) || 0));
+        previewLimitCache.set('book_free_pages', { value, expiresAt: Date.now() + PREVIEW_LIMIT_TTL_MS });
+        return value;
+    } catch {
+        previewLimitCache.set('book_free_pages', { value: 0, expiresAt: Date.now() + 5_000 });
+        return 0;
+    }
+}
+
+async function buildPdfPreview(sourceBuffer, pageLimit) {
+    const { PDFDocument } = require('pdf-lib');
+    const source = await PDFDocument.load(sourceBuffer, { ignoreEncryption: false });
+    const count = Math.min(pageLimit, source.getPageCount());
+    const output = await PDFDocument.create();
+    const pages = await output.copyPages(source, Array.from({ length: count }, (_, index) => index));
+    for (const page of pages) output.addPage(page);
+    return Buffer.from(await output.save());
+}
+
+function stripMarkup(value) {
+    return String(value || '')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function xmlEscape(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function htmlEscape(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+async function buildEpubPreview(sourceBuffer, title, pageLimit) {
+    const JSZip = require('jszip');
+    const zip = await JSZip.loadAsync(sourceBuffer);
+    const names = Object.keys(zip.files);
+    const containerName = names.find((name) => /(^|\/)META-INF\/container\.xml$/i.test(name));
+    if (!containerName) throw new Error('EPUB container is missing.');
+    const containerXml = await zip.file(containerName).async('string');
+    const rootMatch = containerXml.match(/full-path=[\"']([^\"']+)[\"']/i);
+    const rootFile = rootMatch ? rootMatch[1] : '';
+    if (!rootFile || !zip.file(rootFile)) throw new Error('EPUB package metadata is invalid.');
+    const opfDir = rootFile.includes('/') ? rootFile.slice(0, rootFile.lastIndexOf('/') + 1) : '';
+    const opfXml = await zip.file(rootFile).async('string');
+    const manifest = new Map();
+    for (const match of opfXml.matchAll(/<item\b[^>]*\bid=[\"']([^\"']+)[\"'][^>]*\bhref=[\"']([^\"']+)[\"'][^>]*>/gi)) {
+        manifest.set(match[1], match[2]);
+    }
+    const spine = [];
+    for (const match of opfXml.matchAll(/<itemref\b[^>]*\bidref=[\"']([^\"']+)[\"'][^>]*>/gi)) {
+        const href = manifest.get(match[1]);
+        if (href) spine.push(href);
+    }
+    const chunks = [];
+    for (const href of spine) {
+        const fileName = opfDir + decodeURIComponent(String(href).replace(/^\/+/, ''));
+        const file = zip.file(fileName);
+        if (!file) continue;
+        const text = stripMarkup(await file.async('string'));
+        if (text) chunks.push(text);
+    }
+    const combined = chunks.join('\n\n').trim();
+    if (!combined) throw new Error('EPUB contains no readable text.');
+    const pageCount = Math.min(pageLimit, Math.max(1, Math.ceil(combined.length / 1400)));
+    const pages = [];
+    for (let index = 0; index < pageCount; index++) {
+        const start = Math.floor((combined.length * index) / pageCount);
+        const end = Math.floor((combined.length * (index + 1)) / pageCount);
+        pages.push(combined.slice(start, end).trim());
+    }
+    const out = new JSZip();
+    out.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
+    out.folder('META-INF').file('container.xml',
+'<?xml version="1.0" encoding="UTF-8"?>' +
+'<container version="1.0" xmlns="urn:oasis:names:tc:opendocument.org:xmlns:container">' +
+'<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+    const manifest = pages.map((_, index) => '<item id="p' + (index + 1) + '" href="page' + (index + 1) + '.xhtml" media-type="application/xhtml+xml"/>').join('');
+    const spineXml = pages.map((_, index) => '<itemref idref="p' + (index + 1) + '"/>').join('');
+    out.folder('OEBPS').file('content.opf',
+'<?xml version="1.0" encoding="UTF-8"?>' +
+'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">' +
+'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="book-id">hj-groups-preview</dc:identifier><dc:title>' + xmlEscape(title || 'HJ GROUPS Book Preview') + '</dc:title><dc:language>en</dc:language></metadata>' +
+'<manifest>' + manifest + '</manifest><spine>' + spineXml + '</spine></package>');
+    const navItems = pages.map((_, index) => '<li><a href="page' + (index + 1) + '.xhtml">Page ' + (index + 1) + '</a></li>').join('');
+    out.folder('OEBPS').file('nav.xhtml',
+'<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>HJ GROUPS Preview</title></head><body><nav epub:type="toc"><ol>' + navItems + '</ol></nav></body></html>');
+    pages.forEach((page, index) => {
+        const body = htmlEscape(page).replace(/\n\n/g, '</p><p>');
+        const xhtml = '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Page ' + (index + 1) + '</title><style>body{font-family:serif;line-height:1.65;margin:8%;}</style></head><body><h1>' + htmlEscape(title || 'HJ GROUPS Book Preview') + ' — Page ' + (index + 1) + '</h1><p>' + body + '</p></body></html>';
+        out.folder('OEBPS').file('page' + (index + 1) + '.xhtml', xhtml);
+    });
+    return Buffer.from(await out.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+}
+
+async function buildBookPreview(targetMessage, pageLimit) {
+    const key = 'book-preview:' + String(targetMessage && targetMessage.id);
+    const cached = getCachedPreview(key);
+    if (cached) return cached;
+    const sourceBuffer = await downloadTelegramFileBuffer(targetMessage);
+    const name = String(targetMessage?.file?.name || '').toLowerCase();
+    const mime = String(targetMessage?.file?.mimeType || targetMessage?.media?.document?.mimeType || '').toLowerCase();
+    const isEpub = name.endsWith('.epub') || mime === 'application/epub+zip';
+    const result = isEpub
+        ? { body: await buildEpubPreview(sourceBuffer, targetMessage?.file?.name || 'HJ GROUPS Book', pageLimit), contentType: 'application/epub+zip' }
+        : { body: await buildPdfPreview(sourceBuffer, pageLimit), contentType: 'application/pdf' };
+    cachePreview(key, result);
+    return result;
+}
 async function streamMedia(req, res, targetMessage) {
     const fileSize = Number(targetMessage.file.size);
     if (!Number.isFinite(fileSize) || fileSize <= 0) {
