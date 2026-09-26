@@ -969,13 +969,13 @@ async function buildEpubPreview(sourceBuffer, title, pageLimit) {
 '<?xml version="1.0" encoding="UTF-8"?>' +
 '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument.org:xmlns:container">' +
 '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
-    const manifest = pages.map((_, index) => '<item id="p' + (index + 1) + '" href="page' + (index + 1) + '.xhtml" media-type="application/xhtml+xml"/>').join('');
+    const manifestXml = pages.map((_, index) => '<item id="p' + (index + 1) + '" href="page' + (index + 1) + '.xhtml" media-type="application/xhtml+xml"/>').join('');
     const spineXml = pages.map((_, index) => '<itemref idref="p' + (index + 1) + '"/>').join('');
     out.folder('OEBPS').file('content.opf',
 '<?xml version="1.0" encoding="UTF-8"?>' +
 '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">' +
 '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="book-id">hj-groups-preview</dc:identifier><dc:title>' + xmlEscape(title || 'HJ GROUPS Book Preview') + '</dc:title><dc:language>en</dc:language></metadata>' +
-'<manifest>' + manifest + '</manifest><spine>' + spineXml + '</spine></package>');
+'<manifest>' + manifestXml + '</manifest><spine>' + spineXml + '</spine></package>');
     const navItems = pages.map((_, index) => '<li><a href="page' + (index + 1) + '.xhtml">Page ' + (index + 1) + '</a></li>').join('');
     out.folder('OEBPS').file('nav.xhtml',
 '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>HJ GROUPS Preview</title></head><body><nav epub:type="toc"><ol>' + navItems + '</ol></nav></body></html>');
