@@ -78,3 +78,11 @@ test("media endpoints return controlled 404/5xx responses instead of HTTP 200 er
     assert.match(serverSource, /if \(!targetMessage \|\| !targetMessage\.file\) return res\.status\(404\)/);
     assert.match(serverSource, /res\.status\(502\)\.json\(\{ error: 'Telegram media could not be streamed\.' \}\)/);
 });
+
+
+test("Unicode Telegram filenames are encoded safely for Node response headers", () => {
+    assert.match(serverSource, /filename\*=UTF-8/)
+    assert.match(serverSource, /encodeURIComponent\(rawName\)/)
+    assert.match(serverSource, /asciiName = rawName/)
+    assert.match(serverSource, /replace\(\/\[\^\\x20-\\x7E\]\/g, '_ '\.trim\(\)/)
+});
