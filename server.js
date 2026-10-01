@@ -631,7 +631,26 @@ app.get('/telegram/messages', async (req, res) => {
         res.json(mediaMessages);
     } catch (e) {
         console.error('Error fetching telegram messages:', e);
-        res.status(500).json({ error: 'Internal server error while fetching Telegram messages' });
+        const rawMessage = String(e?.message || 'Unknown Telegram runtime error').replace(/[\\r\\n]+/g, ' ').slice(0, 220);
+        const lowerMessage = rawMessage.toLowerCase();
+        const code = /peer|channel|chat|entity/i.test(lowerMessage)
+            ? 'TELEGRAM_CHANNEL_ERROR'
+            : /authorized|authkey|session/i.test(lowerMessage)
+                ? 'TELEGRAM_SESSION_ERROR'
+                : /timeout|network|socket|connection/i.test(lowerMessage)
+                    ? 'TELEGRAM_CONNECTION_ERROR'
+                    : 'TELEGRAM_MESSAGES_ERROR';
+
+        console.error('Telegram messages failure detail:', {
+            code,
+            message: rawMessage,
+        });
+
+        res.status(503).json({
+            error: 'Telegram service temporarily unavailable while fetching messages',
+            code,
+            detail: rawMessage,
+        });
     }
 });
 
