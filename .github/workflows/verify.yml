@@ -18,11 +18,52 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
+
+
+      - name: Live production CORS preflight
+        run: |
+          node <<'NODE'
+          const url = 'https://hj-telegram-streaming.vercel.app/telegram/messages'
+          const origin = 'https://hj-groups-website.getvoroa.com'
+          const response = await fetch(url, {
+            method: 'OPTIONS',
+            headers: {
+              Origin: origin,
+              'Access-Control-Request-Method': 'GET',
+              'Access-Control-Request-Headers': 'authorization',
+            },
+            redirect: 'manual',
+          })
+          const allowOrigin = response.headers.get('access-control-allow-origin')
+          const allowMethods = response.headers.get('access-control-allow-methods') || ''
+          const allowHeaders = response.headers.get('access-control-allow-headers') || ''
+          console.log(JSON.stringify({
+            status: response.status,
+            allowOrigin,
+            allowMethods,
+            allowHeaders,
+          }, null, 2))
+          if (response.status < 200 || response.status >= 300) {
+            throw new Error('Live OPTIONS did not return a 2xx response.')
+          }
+          if (response.status === 301 || response.status === 302 || response.status === 307 || response.status === 308) {
+            throw new Error('Live OPTIONS redirected.')
+          }
+          if (allowOrigin !== origin) {
+            throw new Error('Live CORS origin header mismatch.')
+          }
+          if (!/\bGET\b/i.test(allowMethods)) {
+            throw new Error('Live CORS methods do not allow GET.')
+          }
+          if (!/(^|,\s*)Authorization(,|$)/i.test(allowHeaders)) {
+            throw new Error('Live CORS headers do not allow Authorization.')
+          }
+          NODE
 
       - name: Syntax check
         run: npm test
