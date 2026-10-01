@@ -506,11 +506,6 @@ app.get('/favicon.ico', (req, res) => {
     res.status(204).end();
 });
 
-app.use(async (req, res, next) => {
-    if (await proxyTelegramRequest(req, res)) return;
-    next();
-});
-
 app.get('/telegram/status', (req, res) => {
     const config = validateTelegramConfig();
     applyCors(req, res);
