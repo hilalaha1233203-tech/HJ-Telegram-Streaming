@@ -134,7 +134,7 @@ async function ensureTelegramConnected() {
 const TELEGRAM_RENDER_ORIGIN = String(
     process.env.TELEGRAM_RENDER_ORIGIN ||
     'https://hj-telegram-streaming.onrender.com'
-).trim().replace(/\\/+$/, '');
+).trim().replace(/\/+$/, '');
 
 const TELEGRAM_PROXY_PREFIXES = [
     '/telegram/status',
