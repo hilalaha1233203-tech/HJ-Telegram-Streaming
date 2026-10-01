@@ -1,3 +1,4 @@
+require("dotenv").config({ path: require("node:path").resolve(process.cwd(), ".env") });
 const { TelegramClient } = require("teleproto");
 const { StringSession } = require("teleproto/sessions");
 const readline = require("node:readline/promises");
