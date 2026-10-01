@@ -131,6 +131,104 @@ async function ensureTelegramConnected() {
     return telegramConnectionPromise;
 }
 
+const TELEGRAM_RENDER_ORIGIN = String(
+    process.env.TELEGRAM_RENDER_ORIGIN ||
+    'https://hj-telegram-streaming.onrender.com'
+).trim().replace(/\\/+$/, '');
+
+const USE_RENDER_TELEGRAM_PROXY =
+    String(process.env.TELEGRAM_USE_RENDER_PROXY || '').trim().toLowerCase() === 'true' ||
+    String(process.env.VERCEL || '').trim() === '1';
+
+const TELEGRAM_PROXY_PREFIXES = [
+    '/telegram/status',
+    '/telegram/messages',
+    '/media-ticket/',
+    '/audio/message/',
+    '/video/message/',
+    '/document/message/',
+    '/document/preview/message/',
+];
+
+function shouldProxyTelegramRoute(req) {
+    if (!USE_RENDER_TELEGRAM_PROXY) return false;
+    if (!['GET', 'HEAD'].includes(req.method)) return false;
+    return TELEGRAM_PROXY_PREFIXES.some((prefix) => req.path === prefix || req.path.startsWith(prefix));
+}
+
+function copyProxyHeaders(req, res, response) {
+    const headers = [
+        'cache-control',
+        'content-type',
+        'content-length',
+        'content-range',
+        'accept-ranges',
+        'content-disposition',
+        'content-encoding',
+        'etag',
+        'last-modified',
+        'cross-origin-resource-policy',
+    ];
+
+    for (const name of headers) {
+        const value = response.headers.get(name);
+        if (value) res.setHeader(name, value);
+    }
+
+    applyCors(req, res);
+}
+
+async function proxyTelegramRequest(req, res) {
+    if (!shouldProxyTelegramRoute(req)) return false;
+
+    const targetUrl = new URL(req.originalUrl || req.url, TELEGRAM_RENDER_ORIGIN).toString();
+    const headers = {};
+
+    if (req.headers.authorization) headers.Authorization = req.headers.authorization;
+    if (req.headers.range) headers.Range = req.headers.range;
+    if (req.headers.accept) headers.Accept = req.headers.accept;
+    if (req.headers['content-type']) headers['Content-Type'] = req.headers['content-type'];
+
+    try {
+        const response = await fetch(targetUrl, {
+            method: req.method,
+            headers,
+            redirect: 'manual',
+        });
+
+        copyProxyHeaders(req, res, response);
+
+        if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get('location');
+            if (location) res.setHeader('Location', location);
+        }
+
+        res.status(response.status);
+
+        if (req.method === 'HEAD' || !response.body || response.status === 204 || response.status === 304) {
+            res.end();
+            return true;
+        }
+
+        const { Readable } = require('stream');
+        Readable.fromWeb(response.body).on('error', (error) => {
+            console.error('Telegram proxy stream error:', error?.message || error);
+            if (!res.headersSent) res.status(502).end();
+            else res.destroy(error);
+        }).pipe(res);
+
+        return true;
+    } catch (error) {
+        console.error('Telegram proxy request failed:', String(error?.message || error).slice(0, 300));
+        applyCors(req, res);
+        res.status(502).json({
+            error: 'Telegram streaming service is temporarily unavailable.',
+            code: 'TELEGRAM_PROXY_ERROR',
+        });
+        return true;
+    }
+}
+
 // Premium/VIP media is issued as a short-lived signed ticket. The signing
 // secret never reaches the browser.
 const MEDIA_TICKET_TTL_MS = 2 * 60 * 60 * 1000;
@@ -504,6 +602,11 @@ async function guardDirectMediaRoute(req, res, kind, messageId) {
 
 app.get('/favicon.ico', (req, res) => {
     res.status(204).end();
+});
+
+app.use(async (req, res, next) => {
+    if (await proxyTelegramRequest(req, res)) return;
+    next();
 });
 
 app.get('/telegram/status', (req, res) => {
