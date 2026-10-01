@@ -62,3 +62,19 @@ test("untrusted origins do not receive an allow-origin header", async () => {
     assert.equal(response.status, 204);
     assert.equal(response.headers.get("access-control-allow-origin"), null);
 });
+
+const fs = require("fs");
+const serverSource = fs.readFileSync(require("path").join(__dirname, "..", "server.js"), "utf8");
+
+test("media routes advertise range support and route-aware MIME handling", () => {
+    assert.match(serverSource, /function inferMediaMimeType\(targetMessage, routeKind = "audio"\)/);
+    assert.match(serverSource, /setHeader\('Accept-Ranges', 'bytes'\)/);
+    assert.match(serverSource, /Content-Range/);
+    assert.match(serverSource, /res\.status\(206\)/);
+    assert.match(serverSource, /Telegram media stream ended before the requested byte range completed/);
+});
+
+test("media endpoints return controlled 404/5xx responses instead of HTTP 200 error bodies", () => {
+    assert.match(serverSource, /if \(!targetMessage \|\| !targetMessage\.file\) return res\.status\(404\)/);
+    assert.match(serverSource, /res\.status\(502\)\.json\(\{ error: 'Telegram media could not be streamed\.' \}\)/);
+});
