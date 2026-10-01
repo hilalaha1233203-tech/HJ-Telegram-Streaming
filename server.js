@@ -716,7 +716,7 @@ function setMediaHeaders(req, res, targetMessage, routeKind = 'audio') {
     res.setHeader('Content-Type', mimeType);
     res.setHeader(
         'Content-Disposition',
-        'inline; filename="' + asciiName + '"; filename*=UTF-8\\'\\'' + encodedName
+        'inline; filename="' + asciiName + '"; filename*=UTF-8' + "''" + encodedName
     );
 
     if (fileSize > 0) {
