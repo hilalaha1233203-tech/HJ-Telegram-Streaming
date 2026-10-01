@@ -654,9 +654,49 @@ app.get('/telegram/messages', async (req, res) => {
     }
 });
 
-function setMediaHeaders(req, res, targetMessage) {
+function inferMediaMimeType(targetMessage, routeKind = 'audio') {
+    const explicit = String(
+        targetMessage?.file?.mimeType ||
+        targetMessage?.media?.document?.mimeType ||
+        ''
+    ).trim().toLowerCase();
+
+    if (explicit && explicit !== 'application/octet-stream') return explicit;
+
+    const rawName = String(
+        targetMessage?.file?.name ||
+        targetMessage?.media?.document?.attributes?.find?.((attr) => attr?.className === 'DocumentAttributeFilename')?.fileName ||
+        ''
+    ).trim().toLowerCase();
+
+    const byExtension = {
+        '.mp3': 'audio/mpeg',
+        '.m4a': 'audio/mp4',
+        '.mp4': 'video/mp4',
+        '.aac': 'audio/aac',
+        '.ogg': 'audio/ogg',
+        '.oga': 'audio/ogg',
+        '.opus': 'audio/ogg; codecs=opus',
+        '.wav': 'audio/wav',
+        '.flac': 'audio/flac',
+        '.webm': 'audio/webm',
+        '.mov': 'video/quicktime',
+        '.pdf': 'application/pdf',
+        '.epub': 'application/epub+zip',
+    };
+
+    for (const [extension, mime] of Object.entries(byExtension)) {
+        if (rawName.endsWith(extension)) return mime;
+    }
+
+    if (routeKind === 'video') return 'video/mp4';
+    if (routeKind === 'document') return 'application/octet-stream';
+    return 'audio/mp4';
+}
+
+function setMediaHeaders(req, res, targetMessage, routeKind = 'audio') {
     applyCors(req, res);
-    const mimeType = targetMessage?.file?.mimeType || targetMessage?.media?.document?.mimeType || 'audio/mp4';
+    const mimeType = inferMediaMimeType(targetMessage, routeKind);
     const fileSize = Number(targetMessage?.file?.size || targetMessage?.media?.document?.size || 0);
     const rawName = targetMessage?.file?.name || 'media';
     const safeName = String(rawName).replace(/[\\\"\r\n]/g, '_');
@@ -665,12 +705,11 @@ function setMediaHeaders(req, res, targetMessage) {
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', 'inline; filename="' + safeName + '"');
 
     if (fileSize > 0) {
         res.setHeader('Content-Length', fileSize);
     }
-
-    res.setHeader('Content-Disposition', 'inline; filename="' + safeName + '"');
 }
 
 app.head('/audio/message/:messageId', async (req, res) => {
@@ -683,7 +722,7 @@ app.head('/audio/message/:messageId', async (req, res) => {
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).end();
 
-        setMediaHeaders(req, res, targetMessage);
+        setMediaHeaders(req, res, targetMessage, 'audio');
         res.status(200).end();
     } catch (e) {
         console.error('HEAD media error:', e);
@@ -1041,59 +1080,58 @@ async function buildBookPreview(targetMessage, pageLimit) {
 async function streamMedia(req, res, targetMessage) {
     const fileSize = Number(targetMessage.file.size);
     if (!Number.isFinite(fileSize) || fileSize <= 0) {
-        return res.status(404).send('File size unavailable');
+        return res.status(404).json({ error: 'Telegram media file size is unavailable.' });
     }
 
+    const rangeHeader = String(req.headers.range || '').trim();
+    let start = 0;
+    let end = fileSize - 1;
+
+    if (rangeHeader) {
+        const match = rangeHeader.match(/^bytes=(\\d+)-(\\d*)$/);
+        if (!match) {
+            res.status(416);
+            res.setHeader('Content-Range', `bytes */${fileSize}`);
+            return res.end();
+        }
+
+        start = Number(match[1]);
+        end = match[2] ? Number(match[2]) : fileSize - 1;
+
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+            start < 0 || end < start || start >= fileSize) {
+            res.status(416);
+            res.setHeader('Content-Range', `bytes */${fileSize}`);
+            return res.end();
+        }
+
+        end = Math.min(end, fileSize - 1);
+    }
+
+    const contentLength = end - start + 1;
+    if (rangeHeader) {
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+    } else {
+        res.status(200);
+    }
+
+    res.setHeader('Content-Length', contentLength);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+    const ALIGN = 1048576;
+    const alignedOffset = Math.floor(start / ALIGN) * ALIGN;
+    const skipBytes = start - alignedOffset;
+    let skipRemaining = skipBytes;
+    let remaining = contentLength;
+    let totalSent = 0;
+
     try {
-        const rangeHeader = req.headers.range;
-        let start = 0;
-        let end = fileSize - 1;
-
-        if (rangeHeader) {
-            const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-            if (!match) {
-                res.status(416);
-                res.setHeader("Content-Range", `bytes */${fileSize}`);
-                return res.end();
-            }
-
-            start = Number(match[1]);
-            if (match[2]) end = Number(match[2]);
-
-            if (!Number.isFinite(start) || !Number.isFinite(end) || start >= fileSize || start > end) {
-                res.status(416);
-                res.setHeader("Content-Range", `bytes */${fileSize}`);
-                return res.end();
-            }
-
-            end = Math.min(end, fileSize - 1);
-        }
-
-        const contentLength = end - start + 1;
-
-        if (rangeHeader) {
-            res.status(206);
-            res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
-        } else {
-            res.status(200);
-        }
-
-        res.setHeader("Content-Length", contentLength);
-        res.setHeader("Accept-Ranges", "bytes");
-        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
-
-        const ALIGN = 1048576;
-        const alignedOffset = Math.floor(start / ALIGN) * ALIGN;
-        const skipBytes = start - alignedOffset;
-        let skipRemaining = skipBytes;
-        let remaining = contentLength;
-        let totalSent = 0;
-
         for await (const chunk of (await ensureTelegramConnected()).iterDownload(targetMessage, { offset: alignedOffset })) {
-            if (res.destroyed) break;
+            if (res.destroyed) return;
 
-            let data = chunk;
-
+            let data = Buffer.from(chunk);
             if (skipRemaining > 0) {
                 if (data.length <= skipRemaining) {
                     skipRemaining -= data.length;
@@ -1104,33 +1142,37 @@ async function streamMedia(req, res, targetMessage) {
             }
 
             const allowed = Math.min(data.length, remaining);
-            const output = data.subarray(0, allowed);
-
-            if (output.length > 0) {
-                const writeOk = res.write(output);
+            if (allowed > 0) {
+                const output = data.subarray(0, allowed);
+                if (!res.write(output)) {
+                    await new Promise((resolve) => res.once('drain', resolve));
+                }
                 totalSent += output.length;
                 remaining -= output.length;
-
-                if (!writeOk && !res.destroyed) {
-                    await new Promise((resolve) => res.once("drain", resolve));
-                }
             }
 
-            if (remaining <= 0) break;
+            if (remaining === 0) break;
         }
 
-        if (remaining > 0 && !res.destroyed) {
-            console.error(`❌ Telegram stream ended early. Remaining: ${remaining} bytes`);
+        if (remaining !== 0) {
+            console.error('Telegram media stream ended before the requested byte range completed.', {
+                expected: contentLength,
+                sent: totalSent,
+                remaining,
+            });
+            if (!res.destroyed) res.destroy();
+            return;
         }
 
-        console.log(`✅ Streamed ${totalSent} bytes`);
         if (!res.destroyed) res.end();
     } catch (error) {
-        console.error("\n❌ STREAM ERROR:");
-        console.error(error);
+        console.error('Telegram media stream error:', {
+            name: error?.name || 'Error',
+            message: String(error?.message || error).slice(0, 220),
+        });
         if (!res.headersSent) {
-            res.status(500).send("Telegram streaming error.");
-        } else {
+            res.status(502).json({ error: 'Telegram media could not be streamed.' });
+        } else if (!res.destroyed) {
             res.destroy(error);
         }
     }
