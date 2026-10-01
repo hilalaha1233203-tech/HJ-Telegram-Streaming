@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --check server.js && node --check auto-link-sender.js",
+    "test": "node --check server.js && node --check auto-link-sender.js && node tests/cors.test.js",
     "auto-link": "node auto-link-sender.js",
     "generate:session": "node scripts/generate-session.js"
   },
