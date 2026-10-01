@@ -15,9 +15,8 @@ const ALLOWED_ORIGINS = new Set([
     "https://hj-groups-website.getvoroa.com",
 ]);
 
-// CORS must run before every route, including OPTIONS preflight requests.
-app.use((req, res, next) => {
-    const origin = req.headers.origin;
+function applyCors(req, res) {
+    const origin = String(req.headers.origin || "").trim();
 
     if (origin && ALLOWED_ORIGINS.has(origin)) {
         res.setHeader("Access-Control-Allow-Origin", origin);
@@ -37,12 +36,23 @@ app.use((req, res, next) => {
         "Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type"
     );
     res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+app.use((req, res, next) => {
+    applyCors(req, res);
 
     if (req.method === "OPTIONS") {
         return res.status(204).end();
     }
 
     next();
+});
+
+// Make sure CORS headers are also present on Express error responses that
+// happen after the middleware stack has already started.
+app.use((err, req, res, next) => {
+    applyCors(req, res);
+    next(err);
 });
 
 // Support both the original variable names and the clearer Vercel names.
@@ -498,7 +508,7 @@ app.get('/favicon.ico', (req, res) => {
 
 app.get('/telegram/status', (req, res) => {
     const config = validateTelegramConfig();
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    applyCors(req, res);
     res.status(config.length ? 503 : 200).json({
         ok: config.length === 0,
         telegramConfigured: config.length === 0,
@@ -527,7 +537,7 @@ app.get("/", (req, res) => {
 });
 
 app.options('/telegram/messages', (req, res) => {
-    // The global CORS middleware already sets the origin/header policy.
+    applyCors(req, res);
     res.status(204).end();
 });
 
@@ -625,15 +635,13 @@ app.get('/telegram/messages', async (req, res) => {
     }
 });
 
-function setMediaHeaders(res, targetMessage) {
+function setMediaHeaders(req, res, targetMessage) {
+    applyCors(req, res);
     const mimeType = targetMessage?.file?.mimeType || targetMessage?.media?.document?.mimeType || 'audio/mp4';
     const fileSize = Number(targetMessage?.file?.size || targetMessage?.media?.document?.size || 0);
     const rawName = targetMessage?.file?.name || 'media';
     const safeName = String(rawName).replace(/[\\\"\r\n]/g, '_');
 
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type');
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -656,7 +664,7 @@ app.head('/audio/message/:messageId', async (req, res) => {
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).end();
 
-        setMediaHeaders(res, targetMessage);
+        setMediaHeaders(req, res, targetMessage);
         res.status(200).end();
     } catch (e) {
         console.error('HEAD media error:', e);
