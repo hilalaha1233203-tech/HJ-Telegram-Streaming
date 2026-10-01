@@ -804,7 +804,7 @@ app.head('/video/message/:messageId', async (req, res) => {
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).end();
 
-        setMediaHeaders(res, targetMessage);
+        setMediaHeaders(req, res, targetMessage);
         res.status(200).end();
     } catch (e) {
         console.error('HEAD video error:', e);
@@ -822,7 +822,7 @@ app.head('/document/message/:messageId', async (req, res) => {
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).end();
 
-        setMediaHeaders(res, targetMessage);
+        setMediaHeaders(req, res, targetMessage);
         res.status(200).end();
     } catch (e) {
         console.error('HEAD document error:', e);
@@ -879,7 +879,7 @@ app.get('/audio/message/:messageId', async (req, res) => {
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
 
-        setMediaHeaders(res, targetMessage);
+        setMediaHeaders(req, res, targetMessage);
         await streamMedia(req, res, targetMessage);
     } catch(e) {
         console.error('Audio route error:', e);
@@ -904,7 +904,7 @@ app.get('/video/message/:messageId', async (req, res) => {
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
 
-        setMediaHeaders(res, targetMessage);
+        setMediaHeaders(req, res, targetMessage);
         await streamMedia(req, res, targetMessage);
     } catch(e) {
         console.error('Video route error:', e);
@@ -930,7 +930,7 @@ app.get('/document/preview/message/:messageId', async (req, res) => {
         const targetMessage = messages && messages[0];
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
         const preview = await buildBookPreview(targetMessage, limit);
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        applyCors(req, res);
         res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Content-Disposition');
         res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
         res.setHeader('Cache-Control', 'no-store');
@@ -955,7 +955,7 @@ app.get('/document/message/:messageId', async (req, res) => {
         const [targetMessage] = await telegram.getMessages(CHANNEL_ID, { ids: [messageId] });
         if (!targetMessage || !targetMessage.file) return res.status(404).send('Not found');
 
-        setMediaHeaders(res, targetMessage);
+        setMediaHeaders(req, res, targetMessage);
         await streamMedia(req, res, targetMessage);
     } catch(e) {
         console.error('Document route error:', e);
