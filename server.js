@@ -136,10 +136,6 @@ const TELEGRAM_RENDER_ORIGIN = String(
     'https://hj-telegram-streaming.onrender.com'
 ).trim().replace(/\\/+$/, '');
 
-const USE_RENDER_TELEGRAM_PROXY =
-    String(process.env.TELEGRAM_USE_RENDER_PROXY || '').trim().toLowerCase() === 'true' ||
-    String(process.env.VERCEL || '').trim() === '1';
-
 const TELEGRAM_PROXY_PREFIXES = [
     '/telegram/status',
     '/telegram/messages',
@@ -151,8 +147,23 @@ const TELEGRAM_PROXY_PREFIXES = [
 ];
 
 function shouldProxyTelegramRoute(req) {
-    if (!USE_RENDER_TELEGRAM_PROXY) return false;
     if (!['GET', 'HEAD'].includes(req.method)) return false;
+
+    const requestHost = String(
+        (typeof req.get === 'function' ? req.get('host') : '') ||
+        req.headers?.host ||
+        ''
+    ).trim().toLowerCase();
+
+    const runningOnVercel =
+        String(process.env.VERCEL || '').trim() === '1' ||
+        requestHost.endsWith('.vercel.app');
+
+    const explicitProxy =
+        String(process.env.TELEGRAM_USE_RENDER_PROXY || '').trim().toLowerCase() === 'true';
+
+    if (!runningOnVercel && !explicitProxy) return false;
+
     return TELEGRAM_PROXY_PREFIXES.some((prefix) => req.path === prefix || req.path.startsWith(prefix));
 }
 
@@ -197,6 +208,7 @@ async function proxyTelegramRequest(req, res) {
         });
 
         copyProxyHeaders(req, res, response);
+        res.setHeader('X-HJ-Telegram-Runtime', 'render-proxy');
 
         if (response.status >= 300 && response.status < 400) {
             const location = response.headers.get('location');
