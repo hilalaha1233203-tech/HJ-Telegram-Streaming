@@ -1089,6 +1089,35 @@ async function buildBookPreview(targetMessage, pageLimit) {
     cachePreview(key, result);
     return result;
 }
+function parseByteRange(rangeHeader, fileSize) {
+    const header = String(rangeHeader || '').trim();
+    const size = Number(fileSize);
+
+    if (!header) {
+        return { start: 0, end: size - 1, partial: false };
+    }
+
+    if (!Number.isSafeInteger(size) || size <= 0) {
+        return { error: 'invalid-size' };
+    }
+
+    const match = header.match(/^bytes=(\d+)-(\d*)$/);
+    if (!match) {
+        return { error: 'invalid-range' };
+    }
+
+    const start = Number(match[1]);
+    let end = match[2] ? Number(match[2]) : size - 1;
+
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+        start < 0 || end < start || start >= size) {
+        return { error: 'unsatisfiable' };
+    }
+
+    end = Math.min(end, size - 1);
+    return { start, end, partial: true };
+}
+
 async function streamMedia(req, res, targetMessage) {
     const fileSize = Number(targetMessage.file.size);
     if (!Number.isFinite(fileSize) || fileSize <= 0) {
@@ -1096,32 +1125,18 @@ async function streamMedia(req, res, targetMessage) {
     }
 
     const rangeHeader = String(req.headers.range || '').trim();
-    let start = 0;
-    let end = fileSize - 1;
-
-    if (rangeHeader) {
-        const match = rangeHeader.match(/^bytes=(\\d+)-(\\d*)$/);
-        if (!match) {
-            res.status(416);
-            res.setHeader('Content-Range', `bytes */${fileSize}`);
-            return res.end();
-        }
-
-        start = Number(match[1]);
-        end = match[2] ? Number(match[2]) : fileSize - 1;
-
-        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
-            start < 0 || end < start || start >= fileSize) {
-            res.status(416);
-            res.setHeader('Content-Range', `bytes */${fileSize}`);
-            return res.end();
-        }
-
-        end = Math.min(end, fileSize - 1);
+    const range = parseByteRange(rangeHeader, fileSize);
+    if (range.error) {
+        res.status(416);
+        res.setHeader('Content-Range', `bytes */${fileSize}`);
+        return res.end();
     }
 
+    let start = range.start;
+    let end = range.end;
+
     const contentLength = end - start + 1;
-    if (rangeHeader) {
+    if (range.partial) {
         res.status(206);
         res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
     } else {
@@ -1221,3 +1236,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
+module.exports.parseByteRange = parseByteRange;
