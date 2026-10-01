@@ -67,7 +67,7 @@ const fs = require("fs");
 const serverSource = fs.readFileSync(require("path").join(__dirname, "..", "server.js"), "utf8");
 
 test("media routes advertise range support and route-aware MIME handling", () => {
-    assert.match(serverSource, /function inferMediaMimeType\\(targetMessage, routeKind = ['\"]audio['\"]\\)/);
+    assert.match(serverSource, /function inferMediaMimeType\(targetMessage, routeKind = ['\"]audio['\"]\)/);
     assert.match(serverSource, /setHeader\('Accept-Ranges', 'bytes'\)/);
     assert.match(serverSource, /Content-Range/);
     assert.match(serverSource, /res\.status\(206\)/);
