@@ -28,7 +28,7 @@ jobs:
       - name: Live Telegram runtime configuration
         run: |
           node <<'NODE'
-          const url = 'https://hj-telegram-streaming.vercel.app/telegram/status'
+          const url = 'https://hj-telegram-streaming.onrender.com/telegram/status'
           const response = await fetch(url, {
             headers: { Accept: 'application/json' },
             redirect: 'manual',
@@ -47,7 +47,7 @@ jobs:
       - name: Live production CORS preflight
         run: |
           node <<'NODE'
-          const url = 'https://hj-telegram-streaming.vercel.app/telegram/messages'
+          const url = 'https://hj-telegram-streaming.onrender.com/telegram/messages'
           const origin = 'https://hj-groups-website.getvoroa.com'
           const response = await fetch(url, {
             method: 'OPTIONS',
