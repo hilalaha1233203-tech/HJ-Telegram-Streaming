@@ -84,5 +84,5 @@ test("Unicode Telegram filenames are encoded safely for Node response headers", 
     assert.match(serverSource, /filename\*=UTF-8/)
     assert.match(serverSource, /encodeURIComponent\(rawName\)/)
     assert.match(serverSource, /asciiName = rawName/)
-    assert.match(serverSource, /replace\(\/\[\^\\x20-\\x7E\]\/g, '_ '\.trim\(\)/)
+    assert.match(serverSource, /replace\(\/\[\^\\x20-\\x7E\]\/g, '_'\)/)
 });
