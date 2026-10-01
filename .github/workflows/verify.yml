@@ -25,6 +25,25 @@ jobs:
         run: npm install
 
 
+      - name: Live Telegram runtime configuration
+        run: |
+          node <<'NODE'
+          const url = 'https://hj-telegram-streaming.vercel.app/telegram/status'
+          const response = await fetch(url, {
+            headers: { Accept: 'application/json' },
+            redirect: 'manual',
+          })
+          const payload = await response.json().catch(() => null)
+          console.log(JSON.stringify({
+            status: response.status,
+            ok: payload?.ok,
+            telegramConfigured: payload?.telegramConfigured,
+          }, null, 2))
+          if (response.status !== 200 || payload?.ok !== true || payload?.telegramConfigured !== true) {
+            throw new Error('Telegram runtime configuration is not healthy.')
+          }
+          NODE
+
       - name: Live production CORS preflight
         run: |
           node <<'NODE'
