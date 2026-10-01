@@ -86,3 +86,26 @@ test("Unicode Telegram filenames are encoded safely for Node response headers", 
     assert.match(serverSource, /asciiName = rawName/)
     assert.match(serverSource, /replace\(\/\[\^\\x20-\\x7E\]\/g, '_'\)/)
 });
+
+
+test("byte-range parser accepts browser audio ranges and rejects unsatisfiable ranges", () => {
+    const { parseByteRange } = app;
+    assert.deepEqual(parseByteRange("bytes=0-", 1000), {
+        start: 0,
+        end: 999,
+        partial: true,
+    });
+    assert.deepEqual(parseByteRange("bytes=128-255", 1000), {
+        start: 128,
+        end: 255,
+        partial: true,
+    });
+    assert.deepEqual(parseByteRange("bytes=950-1200", 1000), {
+        start: 950,
+        end: 999,
+        partial: true,
+    });
+    assert.equal(parseByteRange("bytes=1000-", 1000).error, "unsatisfiable");
+    assert.equal(parseByteRange("bytes=abc-", 1000).error, "invalid-range");
+    assert.equal(parseByteRange("", 1000).partial, false);
+});
