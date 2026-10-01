@@ -698,14 +698,26 @@ function setMediaHeaders(req, res, targetMessage, routeKind = 'audio') {
     applyCors(req, res);
     const mimeType = inferMediaMimeType(targetMessage, routeKind);
     const fileSize = Number(targetMessage?.file?.size || targetMessage?.media?.document?.size || 0);
-    const rawName = targetMessage?.file?.name || 'media';
-    const safeName = String(rawName).replace(/[\\\"\r\n]/g, '_');
+    const rawName = String(targetMessage?.file?.name || 'media');
+    // HTTP header values must remain Latin-1/ASCII-safe in Node. Telegram
+    // filenames may contain Tamil or other Unicode characters, so send an
+    // ASCII fallback plus an RFC 5987 UTF-8 filename* parameter.
+    const asciiName = rawName
+        .normalize('NFKD')
+        .replace(/[^\x20-\x7E]/g, '_')
+        .replace(/[\"\r\n]/g, '_')
+        .trim() || 'media';
+    const encodedName = encodeURIComponent(rawName)
+        .replace(/['()*]/g, (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase());
 
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Disposition', 'inline; filename="' + safeName + '"');
+    res.setHeader(
+        'Content-Disposition',
+        'inline; filename="' + asciiName + '"; filename*=UTF-8\\'\\'' + encodedName
+    );
 
     if (fileSize > 0) {
         res.setHeader('Content-Length', fileSize);
