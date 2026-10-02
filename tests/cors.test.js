@@ -35,6 +35,7 @@ test("production origin preflight is accepted without authentication", async () 
     assert.equal(response.headers.get("access-control-allow-origin"), "https://hj-groups-website.getvoroa.com");
     assert.match(response.headers.get("access-control-allow-methods") || "", /(^|,\s*)GET(,|$)/i);
     assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Authorization(,|$)/i);
+    assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Cache-Control(,|$)/i);
 });
 
 test("allowed origin is preserved on authenticated API error responses", async () => {
