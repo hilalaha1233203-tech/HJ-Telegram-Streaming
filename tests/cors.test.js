@@ -36,6 +36,7 @@ test("production origin preflight is accepted without authentication", async () 
     assert.match(response.headers.get("access-control-allow-methods") || "", /(^|,\s*)GET(,|$)/i);
     assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Authorization(,|$)/i);
     assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Cache-Control(,|$)/i);
+    assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Pragma(,|$)/i);
 });
 
 test("allowed origin is preserved on authenticated API error responses", async () => {
