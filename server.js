@@ -29,7 +29,7 @@ function applyCors(req, res) {
     );
     res.setHeader(
         "Access-Control-Allow-Headers",
-        "Authorization, Content-Type, Range"
+        "Authorization, Cache-Control, Content-Type, Range"
     );
     res.setHeader(
         "Access-Control-Expose-Headers",
