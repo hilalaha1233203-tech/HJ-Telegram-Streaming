@@ -111,3 +111,11 @@ test("byte-range parser accepts browser audio ranges and rejects unsatisfiable r
     assert.equal(parseByteRange("bytes=abc-", 1000).error, "invalid-range");
     assert.equal(parseByteRange("", 1000).partial, false);
 });
+
+
+test("protected media tickets are short-lived, browser-bound, and admin authorization is role-based", () => {
+    assert.match(serverSource, /const MEDIA_TICKET_TTL_MS = 5 \* 60 \* 1000/);
+    assert.match(serverSource, /createHash\(['"]sha256['"]\)/);
+    assert.match(serverSource, /app_metadata\?\.role !== ['"]admin['"]/);
+    assert.equal(serverSource.includes("ADMIN_EMAIL"), false);
+});
