@@ -133,7 +133,7 @@ async function ensureTelegramConnected() {
 
 // Premium/VIP media is issued as a short-lived signed ticket. The signing
 // secret never reaches the browser.
-const MEDIA_TICKET_TTL_MS = 2 * 60 * 60 * 1000;
+const MEDIA_TICKET_TTL_MS = 5 * 60 * 1000;
 const MEDIA_TICKET_SECRET = String(
     process.env.MEDIA_TICKET_SECRET ||
     process.env.TELEGRAM_SESSION ||
@@ -157,7 +157,6 @@ const HJ_WEB_BASE_URL = String(
     'https://hj-groups-website.getvoroa.com'
 ).trim().replace(/\/+$/, '');
 
-const ADMIN_EMAIL = 'hilalaha1233203@gmail.com';
 const mediaPolicyCache = new Map();
 const MEDIA_POLICY_TTL_MS = 30_000;
 
@@ -357,13 +356,14 @@ async function hasPurchaseForContent(userId, kind, row, authHeader) {
     });
 }
 
-function createMediaTicket(kind, messageId, userId) {
+function createMediaTicket(kind, messageId, userId, userAgent = '') {
     if (!MEDIA_TICKET_SECRET) throw new Error('Media ticket secret is not configured.');
 
     const payload = Buffer.from(JSON.stringify({
         kind,
         messageId: Number(messageId),
         userId: String(userId),
+        ua: crypto.createHash('sha256').update(String(userAgent || '')).digest('base64url'),
         exp: Date.now() + MEDIA_TICKET_TTL_MS,
     })).toString('base64url');
 
@@ -375,7 +375,7 @@ function createMediaTicket(kind, messageId, userId) {
     return payload + '.' + signature;
 }
 
-function verifyMediaTicket(token, kind, messageId) {
+function verifyMediaTicket(token, kind, messageId, userAgent = '') {
     if (!MEDIA_TICKET_SECRET || !token) return null;
 
     const parts = String(token).split('.');
@@ -396,6 +396,8 @@ function verifyMediaTicket(token, kind, messageId) {
         if (value.kind !== kind) return null;
         if (Number(value.messageId) !== Number(messageId)) return null;
         if (!value.userId || Number(value.exp) <= Date.now()) return null;
+        const expectedUa = crypto.createHash('sha256').update(String(userAgent || '')).digest('base64url');
+        if (!value.ua || !crypto.timingSafeEqual(Buffer.from(value.ua), Buffer.from(expectedUa))) return null;
         return value;
     } catch {
         return null;
@@ -404,7 +406,7 @@ function verifyMediaTicket(token, kind, messageId) {
 
 async function inspectMediaAccess(req, kind, messageId) {
     const ticket = String(req.query.ticket || '').trim();
-    const ticketUser = verifyMediaTicket(ticket, kind, messageId);
+    const ticketUser = verifyMediaTicket(ticket, kind, messageId, req.headers['user-agent'] || '');
     if (ticketUser) return { ok: true, viaTicket: true, userId: ticketUser.userId };
 
     const policyResult = await lookupMediaPolicy(kind, messageId);
@@ -556,7 +558,7 @@ app.get('/telegram/messages', async (req, res) => {
         if (!authResponse.ok) return res.status(401).json({ error: 'Invalid Supabase token' });
 
         const user = await authResponse.json();
-        if (user.email !== 'hilalaha1233203@gmail.com') {
+        if (user?.app_metadata?.role !== 'admin') {
             return res.status(403).json({ error: 'Forbidden: Admin access required' });
         }
 
@@ -802,7 +804,7 @@ app.get('/media-ticket/:type/message/:messageId', async (req, res) => {
             return res.status(401).json({ error: 'Login is required for premium/VIP media.' });
         }
 
-        const token = createMediaTicket(type, messageId, userId);
+        const token = createMediaTicket(type, messageId, userId, req.headers['user-agent'] || '');
         const expiresAt = new Date(Date.now() + MEDIA_TICKET_TTL_MS).toISOString();
         const url = publicBaseUrl(req) +
             '/' + type + '/message/' + encodeURIComponent(messageId) +
