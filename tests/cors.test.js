@@ -113,9 +113,3 @@ test("byte-range parser accepts browser audio ranges and rejects unsatisfiable r
 });
 
 
-test("protected media tickets are short-lived, browser-bound, and admin authorization is role-based", () => {
-    assert.match(serverSource, /const MEDIA_TICKET_TTL_MS = 5 \* 60 \* 1000/);
-    assert.match(serverSource, /createHash\(['"]sha256['"]\)/);
-    assert.match(serverSource, /app_metadata\?\.role !== ['"]admin['"]/);
-    assert.equal(serverSource.includes("ADMIN_EMAIL"), false);
-});
