@@ -397,7 +397,10 @@ function verifyMediaTicket(token, kind, messageId, userAgent = '') {
         if (Number(value.messageId) !== Number(messageId)) return null;
         if (!value.userId || Number(value.exp) <= Date.now()) return null;
         const expectedUa = crypto.createHash('sha256').update(String(userAgent || '')).digest('base64url');
-        if (!value.ua || !crypto.timingSafeEqual(Buffer.from(value.ua), Buffer.from(expectedUa))) return null;
+        if (!value.ua) return null;
+        const actualUa = Buffer.from(String(value.ua));
+        const expectedUaBuffer = Buffer.from(expectedUa);
+        if (actualUa.length !== expectedUaBuffer.length || !crypto.timingSafeEqual(actualUa, expectedUaBuffer)) return null;
         return value;
     } catch {
         return null;
