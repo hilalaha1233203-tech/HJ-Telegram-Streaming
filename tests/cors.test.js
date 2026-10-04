@@ -81,6 +81,14 @@ test("media endpoints return controlled 404/5xx responses instead of HTTP 200 er
     assert.match(serverSource, /res\.status\(502\)\.json\(\{ error: 'Telegram media could not be streamed\.' \}\)/);
 });
 
+test("protected media delegates entitlement to the HJ web server", () => {
+    assert.match(serverSource, /async function verifyWebEntitlement\(authHeader, kind, row\)/);
+    assert.match(serverSource, /HJ_WEB_BASE_URL \+ '\/api\/shortener\/access'/);
+    assert.match(serverSource, /const entitlement = await verifyWebEntitlement\(authHeader, kind, row\)/);
+    assert.match(serverSource, /if \(!entitlement\.ok\) return entitlement/);
+});
+
+
 
 test("Unicode Telegram filenames are encoded safely for Node response headers", () => {
     assert.match(serverSource, /filename\*=UTF-8/)
