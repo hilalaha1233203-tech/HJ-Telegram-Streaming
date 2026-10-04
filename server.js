@@ -439,31 +439,15 @@ async function inspectMediaAccess(req, kind, messageId) {
         return { ok: false, status: 401, error: 'Login is required for protected media.' };
     }
 
-    const accessTypes = parseAccessTypes(row.access_type);
-    if (accessTypes.includes('ads')) {
-        const entitlement = await verifyWebEntitlement(authHeader, kind, row);
-        if (!entitlement.ok) return entitlement;
-        const user = await getSupabaseUser(authHeader);
-        return { ok: true, viaTicket: false, row, user };
-    }
+    // HJ GROUPS web server is the single entitlement authority for protected
+    // media. This covers purchases, temporary unlocks, admin access and the
+    // server-side per-user VIP grant without exposing the VIP table to clients.
+    const entitlement = await verifyWebEntitlement(authHeader, kind, row);
+    if (!entitlement.ok) return entitlement;
 
     const user = await getSupabaseUser(authHeader);
     if (!user?.id) {
         return { ok: false, status: 401, error: 'Invalid or expired login session.' };
-    }
-
-    if (String(user.email || '').toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
-        return { ok: true, viaTicket: false, row, user };
-    }
-
-    try {
-        const purchased = await hasPurchaseForContent(user.id, kind, row, authHeader);
-        if (!purchased) {
-            return { ok: false, status: 403, error: 'Premium purchase is required for this media.' };
-        }
-    } catch (error) {
-        console.warn('Purchase lookup failed:', error?.statusCode || 'request_error');
-        return { ok: false, status: 503, error: 'Premium entitlement could not be verified.' };
     }
 
     return { ok: true, viaTicket: false, row, user };
