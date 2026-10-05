@@ -33,7 +33,7 @@ function applyCors(req, res) {
     );
     res.setHeader(
         "Access-Control-Expose-Headers",
-        "Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type"
+        "Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type, X-HJ-Telegram-Next-Offset, X-HJ-Telegram-Has-More"
     );
     res.setHeader("Access-Control-Max-Age", "86400");
 }
