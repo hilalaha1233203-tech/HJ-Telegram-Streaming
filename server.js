@@ -549,9 +549,14 @@ app.get('/telegram/messages', async (req, res) => {
             return res.status(403).json({ error: 'Forbidden: Admin access required' });
         }
 
-        const limit = Number(req.query.limit) || 100;
+        const requestedLimit = Number(req.query.limit);
+        const limit = Number.isInteger(requestedLimit) ? Math.min(100, Math.max(1, requestedLimit)) : 100;
+        const requestedOffsetId = Number(req.query.offset_id);
+        const offsetId = Number.isInteger(requestedOffsetId) && requestedOffsetId > 0 ? requestedOffsetId : 0;
         const telegram = await ensureTelegramConnected();
-        const messages = await telegram.getMessages(CHANNEL_ID, { limit });
+        const messageParams = { limit };
+        if (offsetId > 0) messageParams.offsetId = offsetId;
+        const messages = await telegram.getMessages(CHANNEL_ID, messageParams);
 
         const requestedType = String(req.query.type || 'audio').toLowerCase();
         const mediaType = ['audio', 'video', 'document'].includes(requestedType)
@@ -587,6 +592,8 @@ app.get('/telegram/messages', async (req, res) => {
             let duration = 0;
             let width = 0;
             let height = 0;
+            let audioTitle = '';
+            let performer = '';
 
             if (doc.attributes) {
                 for (const attr of doc.attributes) {
@@ -595,6 +602,8 @@ app.get('/telegram/messages', async (req, res) => {
                     }
                     if (attr.className === 'DocumentAttributeAudio') {
                         duration = attr.duration || 0;
+                        audioTitle = attr.title || '';
+                        performer = attr.performer || '';
                     }
                     if (attr.className === 'DocumentAttributeVideo') {
                         duration = attr.duration || 0;
@@ -613,10 +622,19 @@ app.get('/telegram/messages', async (req, res) => {
                 width,
                 height,
                 date: msg.date,
-                caption: msg.message || ''
+                caption: msg.message || '',
+                audioTitle: audioTitle || '',
+                performer: performer || ''
             });
         }
 
+        const lastMessageId = messages.length ? Number(messages[messages.length - 1]?.id) : 0;
+        const nextOffsetId = messages.length >= limit && Number.isInteger(lastMessageId) && lastMessageId > 0
+            ? lastMessageId
+            : 0;
+        applyCors(req, res);
+        res.setHeader('X-HJ-Telegram-Next-Offset', nextOffsetId ? String(nextOffsetId) : '');
+        res.setHeader('X-HJ-Telegram-Has-More', nextOffsetId ? 'true' : 'false');
         res.json(mediaMessages);
     } catch (e) {
         console.error('Error fetching telegram messages:', e);
