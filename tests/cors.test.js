@@ -21,6 +21,22 @@ test.after(async () => {
     await new Promise((resolve) => server.close(resolve));
 });
 
+test("local HJ web origin preflight is accepted without authentication", async () => {
+    const response = await fetch(baseUrl + "/telegram/messages", {
+        method: "OPTIONS",
+        headers: {
+            Origin: "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    });
+
+    assert.equal(response.status, 204);
+    assert.equal(response.headers.get("access-control-allow-origin"), "http://localhost:5173");
+    assert.match(response.headers.get("access-control-allow-methods") || "", /(^|,\s*)GET(,|$)/i);
+    assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Authorization(,|$)/i);
+});
+
 test("production origin preflight is accepted without authentication", async () => {
     const response = await fetch(baseUrl + "/telegram/messages", {
         method: "OPTIONS",
