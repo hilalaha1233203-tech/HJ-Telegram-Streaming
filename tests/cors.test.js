@@ -81,6 +81,14 @@ test("media endpoints return controlled 404/5xx responses instead of HTTP 200 er
     assert.match(serverSource, /res\.status\(502\)\.json\(\{ error: 'Telegram media could not be streamed\.' \}\)/);
 });
 
+test("Telegram scan exposes pagination headers and reads the client cursor", () => {
+    assert.match(serverSource, /offset_id/);
+    assert.match(serverSource, /messageParams\.offsetId = offsetId/);
+    assert.match(serverSource, /X-HJ-Telegram-Next-Offset/);
+    assert.match(serverSource, /X-HJ-Telegram-Has-More/);
+    assert.match(serverSource, /audioTitle = attr\.title/);
+    assert.match(serverSource, /performer = attr\.performer/);
+});
 test("protected media delegates entitlement to the HJ web server", () => {
     assert.match(serverSource, /async function verifyWebEntitlement\(authHeader, kind, row\)/);
     assert.match(serverSource, /HJ_WEB_BASE_URL \+ '\/api\/shortener\/access'/);
