@@ -10,9 +10,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const FILE_NAME = "TEST.m4a";
 
-const ALLOWED_ORIGINS = new Set([
+const DEFAULT_ALLOWED_ORIGINS = [
     "https://hj-groups-web.vercel.app",
     "https://hj-groups-website.getvoroa.com",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+];
+
+const configuredOrigins = String(process.env.CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+const ALLOWED_ORIGINS = new Set([
+    ...DEFAULT_ALLOWED_ORIGINS,
+    ...configuredOrigins,
 ]);
 
 function applyCors(req, res) {
