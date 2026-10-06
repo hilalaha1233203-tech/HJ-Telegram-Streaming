@@ -1,0 +1,37 @@
+name: Cloudflare Worker check
+
+on:
+  push:
+    branches:
+      - main
+      - feat/cloudflare-direct-telegram-streaming
+  pull_request:
+
+jobs:
+  cloudflare-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-worker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cloudflare-worker/package.json
+
+      - name: Install
+        run: npm install --no-package-lock
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Wrangler dry-run bundle check
+        run: npx wrangler@4.146.0 deploy --dry-run --outdir .wrangler-dry-run
