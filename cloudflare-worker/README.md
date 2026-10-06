@@ -1,80 +1,54 @@
-# HJ GROUPS — Cloudflare Direct Telegram Streaming
+# HJ GROUPS — Lightweight Telegram Bot API Streaming
 
-This worker is the direct-media replacement for the old Node/Render streaming hop.
+This Worker is the browser-facing media gateway for the HJ GROUPS website.
 
 ## Runtime architecture
 
-`Telegram MTProto → Cloudflare Worker → Browser`
+Browser -> Cloudflare Worker -> Telegram Bot API getFile -> Telegram file response -> Browser
 
-The existing website routes remain compatible:
-
-- `GET /audio/message/:messageId`
-- `GET /video/message/:messageId`
-- `GET /document/message/:messageId`
-- `HEAD` equivalents
-- `GET /media-ticket/:type/message/:messageId`
-- `GET /telegram/messages`
-- `GET /telegram/status`
-- `GET /health`
-
-The Worker serves media directly from Telegram. Range requests are bounded to 1 MiB per request, while a request without Range returns a normal full-file 200 stream. The Worker does not use the Workers Cache API for media because Cloudflare does not allow storing 206 Partial Content responses there.
-
-Public media chunks are cached at Cloudflare's edge cache. Protected media with signed tickets is never cached.
+The Worker no longer uses the heavy MTProto teleproto client for website media delivery. This is intentional: the free Worker CPU limit previously terminated the MTProto streaming request.
 
 ## Required Worker secrets / variables
 
 Set these in Cloudflare; never commit them:
 
-```text
-TELEGRAM_API_ID
-TELEGRAM_API_HASH
-TELEGRAM_SESSION
-CHANNEL_ID
-MEDIA_TICKET_SECRET
-SUPABASE_URL
-SUPABASE_PUBLISHABLE_KEY
-HJ_WEB_BASE_URL
-CORS_ALLOWED_ORIGINS
-```
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_BOT_TOKEN
+- SUPABASE_URL
+- SUPABASE_PUBLISHABLE_KEY
+- SUPABASE_SERVICE_ROLE_KEY
+- HJ_WEB_BASE_URL
+- MEDIA_TICKET_SECRET
+- CORS_ALLOWED_ORIGINS
 
-Use a strong random `MEDIA_TICKET_SECRET`.
+The SUPABASE_SERVICE_ROLE_KEY is only used server-side to read telegram_media_index. Never expose it to the browser.
 
-## Important plan note
+## Media requirement
 
-The Workers Free plan has a 10 ms CPU limit per invocation. The Workers Paid plan starts at $5/month and has no additional data-transfer/egress or throughput charge; its standard model includes 30 million CPU milliseconds/month. For reliable MTProto media streaming, use Workers Paid rather than relying on the 10 ms Free CPU ceiling.
+Telegram Bot API getFile currently supports bot downloads up to 20 MB. The Worker intentionally returns HTTP 413 for indexed media above 20 MB. Use the HJ Store Keeper Compression Center and the 19 MB — Web Stream target for website playback.
+
+The Worker passes browser Range requests to Telegram's file URL and preserves a 206 response when Telegram honors the range. If Telegram returns a full 200 response to a requested range, the Worker forwards that response and marks X-HJ-Telegram-Range accordingly; a live browser seek test is still required after deployment.
+
+## Existing website routes
+
+- GET /audio/message/:messageId
+- GET /video/message/:messageId
+- GET /document/message/:messageId
+- HEAD equivalents
+- GET /media-ticket/:type/message/:messageId
+- GET /telegram/messages
+- GET /telegram/status
+- GET /health
 
 ## Deployment
 
-From `cloudflare-worker/`:
+From cloudflare-worker/:
 
-```bash
-npm install
-npx wrangler login
-npm run test
-npm run dry-run
-npx wrangler deploy
-```
+1. npm install
+2. npm run test
+3. npm run dry-run
+4. npx wrangler deploy
 
-Then set secrets with `npx wrangler secret put NAME`.
+Then configure the Worker secrets with wrangler secret put NAME.
 
-After deployment, verify:
-
-```text
-GET /health
-GET /telegram/status?ping=1
-HEAD /audio/message/7
-GET /audio/message/7
-Range: bytes=0-524287
-Range: bytes=524288-1048575
-```
-
-Set the website's existing `VITE_STREAMING_SERVER_URL` to the Worker URL. No Episode Analytics changes are required.
-
-## Security rules
-
-- Telegram credentials are Worker secrets.
-- Protected media still uses the HJ entitlement authority through `/api/shortener/access`.
-- Signed media tickets are bound to user-agent and expire after 5 minutes.
-- Free public media uses wildcard CORS because it contains no browser credentials.
-- Media responses are not stored in the Worker Cache API; Telegram remains the source of truth.
-- The Worker never returns the Telegram session in an error response.
+The old TELEGRAM_API_ID, TELEGRAM_API_HASH and TELEGRAM_SESSION secrets can remain for the old branch, but this Worker code does not use them for media delivery.
