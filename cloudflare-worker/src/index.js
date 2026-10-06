@@ -636,54 +636,102 @@ function mediaError(status, code, origin, env, detail = "") {
   return jsonResponse(errorPayload(code, detail), status, origin, env);
 }
 
-async function fetchMediaChunk(env, message, start, length, signal) {
-  const client = await getTelegramClient(env);
+function createTelegramMediaStream(env, message, startOffset, byteLength, requestSignal) {
+  const streamAbort = new AbortController();
+  let generator = null;
+  let remaining = byteLength == null ? null : Number(byteLength);
+  let cleaned = false;
 
-  return withTelegramSlot(async () => {
-    const generator = client.iterDownload(message, {
-      offset: start,
-      limit: length,
-      requestSize: Math.max(
-        4096,
-        Math.min(
-          MEDIA_CHUNK_SIZE,
-          Math.ceil(length / 4096) * 4096
-        )
-      ),
-      signal,
-    });
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    requestSignal?.removeEventListener("abort", onRequestAbort);
+  };
 
-    let remaining = length;
-    const output = [];
+  const onRequestAbort = () => streamAbort.abort();
 
+  if (requestSignal?.aborted) {
+    streamAbort.abort();
+  } else {
+    requestSignal?.addEventListener("abort", onRequestAbort, { once: true });
+  }
+
+  const finishGenerator = async () => {
     try {
-      for await (const chunk of generator) {
-        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const bytes = Buffer.from(chunk);
-        if (!bytes.length) break;
+      await generator?.return?.();
+    } catch {}
+    generator = null;
+  };
 
-        const take = Math.min(bytes.length, remaining);
-        if (take > 0) output.push(bytes.subarray(0, take));
-        remaining -= take;
-
-        if (remaining <= 0) break;
-      }
-    } finally {
+  return new ReadableStream({
+    async pull(controller) {
       try {
-        await generator.return?.();
-      } catch {}
-    }
+        if (streamAbort.signal.aborted) {
+          cleanup();
+          controller.close();
+          return;
+        }
 
-    if (remaining > 0) {
-      throw Object.assign(
-        new Error("Telegram returned fewer bytes than requested"),
-        { code: "TELEGRAM_SHORT_READ" }
-      );
-    }
+        const client = await getTelegramClient(env);
+        if (!generator) {
+          generator = client.iterDownload(message, {
+            offset: startOffset,
+            limit: remaining == null ? undefined : remaining,
+            requestSize: MEDIA_CHUNK_SIZE,
+            signal: streamAbort.signal,
+          });
+        }
 
-    return Buffer.concat(output);
+        const next = await generator.next();
+        if (next.done) {
+          cleanup();
+          controller.close();
+          return;
+        }
+
+        const chunk = Buffer.from(next.value || "");
+        if (!chunk.length) {
+          cleanup();
+          controller.close();
+          return;
+        }
+
+        if (remaining != null) {
+          const take = Math.min(chunk.length, remaining);
+          if (take > 0) {
+            controller.enqueue(chunk.subarray(0, take));
+            remaining -= take;
+          }
+          if (remaining <= 0) {
+            await finishGenerator();
+            cleanup();
+            controller.close();
+          }
+          return;
+        }
+
+        controller.enqueue(chunk);
+      } catch (error) {
+        cleanup();
+        await finishGenerator();
+
+        if (streamAbort.signal.aborted || error?.name === "AbortError") {
+          controller.close();
+          return;
+        }
+
+        controller.error(error);
+      }
+    },
+
+    async cancel() {
+      streamAbort.abort();
+      await finishGenerator();
+      cleanup();
+    },
   });
 }
+
 
 async function handleMedia(request, env, ctx, kind, messageId) {
   if (!parseMessageId(messageId)) {
@@ -783,7 +831,7 @@ async function handleMedia(request, env, ctx, kind, messageId) {
   }
 
   const cache = caches.default;
-  const canCache = !isProtected && request.method === "GET";
+  const canCache = !isProtected && request.method === "GET" && range.requested;
   if (canCache) {
     const hit = await getCachedMedia(cache, request, kind, Number(messageId), range);
     if (hit) {
@@ -796,21 +844,17 @@ async function handleMedia(request, env, ctx, kind, messageId) {
     }
   }
 
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  request.signal.addEventListener("abort", onAbort, { once: true });
-
   try {
-    const bytes = await fetchMediaChunk(
+    const body = createTelegramMediaStream(
       env,
       message,
       range.start,
-      range.length,
-      controller.signal
+      range.requested ? range.length : null,
+      request.signal
     );
 
-    const response = new Response(bytes, {
-      status: range.partial ? 206 : 200,
+    const response = new Response(body, {
+      status: range.requested ? 206 : 200,
       headers,
     });
 
@@ -831,7 +875,7 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       return new Response(null, { status: 499, headers });
     }
 
-    console.error("HJ Telegram media error", {
+    console.error("HJ Telegram media stream error", {
       kind,
       messageId: Number(messageId),
       error: String(error?.message || error).slice(0, 200),
@@ -844,8 +888,6 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       env,
       error?.message
     );
-  } finally {
-    request.signal.removeEventListener("abort", onAbort);
   }
 }
 
