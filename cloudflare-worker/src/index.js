@@ -1,5 +1,5 @@
-import { TelegramClient, Api } from "teleproto";
-import { StringSession } from "teleproto/sessions";
+import { TelegramClient } from "teleproto";
+import { StringSession } from "teleproto/sessions/index.js";
 import { createHmac, createHash, timingSafeEqual } from "node:crypto";
 import {
   MEDIA_CACHE_TTL,
