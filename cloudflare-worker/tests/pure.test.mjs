@@ -25,12 +25,13 @@ test("parseMessageId accepts only positive safe integers", () => {
   assert.equal(parseMessageId("abc"), null);
 });
 
-test("range without header is capped to the worker media chunk size", () => {
+test("request without Range remains a standards-compliant full response", () => {
   const range = parseSingleRange("", document.size);
   assert.equal(range.start, 0);
-  assert.equal(range.end, MEDIA_CHUNK_SIZE - 1);
-  assert.equal(range.length, MEDIA_CHUNK_SIZE);
-  assert.equal(range.partial, true);
+  assert.equal(range.end, document.size - 1);
+  assert.equal(range.length, document.size);
+  assert.equal(range.partial, false);
+  assert.equal(range.requested, false);
 });
 
 test("bounded explicit range is returned exactly", () => {
