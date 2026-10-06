@@ -126,7 +126,7 @@ async function createTelegramClient(env) {
   }
 }
 
-function cacheMetadata(key, message) {(key, message) {
+function cacheMetadata(key, message) {
   mediaMetadataCache.set(key, {
     message,
     expiresAt: Date.now() + MEDIA_METADATA_TTL_MS,
@@ -608,6 +608,7 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
     clientClosed = true;
     try { await client.disconnect(); } catch {}
   };
+
   const streamAbort = new AbortController();
   let generator = null;
   let remaining = byteLength == null ? null : Number(byteLength);
@@ -628,9 +629,7 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
   }
 
   const finishGenerator = async () => {
-    try {
-      await generator?.return?.();
-    } catch {}
+    try { await generator?.return?.(); } catch {}
     generator = null;
   };
 
@@ -639,12 +638,12 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
       try {
         if (streamAbort.signal.aborted) {
           cleanup();
+          await finishGenerator();
           await closeClient();
           controller.close();
           return;
         }
 
-        const client = await getTelegramClient(env);
         if (!generator) {
           generator = client.iterDownload(message, {
             offset: startOffset,
@@ -655,8 +654,10 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
         }
 
         const next = await generator.next();
+
         if (next.done) {
           cleanup();
+          await closeClient();
           controller.close();
           return;
         }
@@ -664,6 +665,8 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
         const chunk = Buffer.from(next.value || "");
         if (!chunk.length) {
           cleanup();
+          await finishGenerator();
+          await closeClient();
           controller.close();
           return;
         }
@@ -674,6 +677,7 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
             controller.enqueue(chunk.subarray(0, take));
             remaining -= take;
           }
+
           if (remaining <= 0) {
             await finishGenerator();
             cleanup();
@@ -711,7 +715,6 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
   });
 }
 
-
 async function handleMedia(request, env, ctx, kind, messageId) {
   if (!parseMessageId(messageId)) {
     return mediaError(400, "INVALID_MESSAGE_ID", request.headers.get("origin") || "", env);
@@ -728,8 +731,10 @@ async function handleMedia(request, env, ctx, kind, messageId) {
     );
   }
 
-  const isProtected = isProtectedPolicy(access.row || {});
-  if (isProtected && !access.viaTicket && !access.viaPreview) {
+  const isPreview = Boolean(access.viaPreview);
+  const isProtected = Boolean(access.viaTicket || isProtectedPolicy(access.row || {}));
+
+  if (isProtected && !access.viaTicket && !isPreview) {
     return mediaError(
       403,
       "SECURE_TICKET_REQUIRED",
@@ -738,96 +743,101 @@ async function handleMedia(request, env, ctx, kind, messageId) {
     );
   }
 
-  let client = null;
-  let handedOffToStream = false;
-  try {
-    client = await createTelegramClient(env);
-    message = await getTelegramMessage(Number(messageId), client);
-  } catch (error) {
-    const code = error?.code === "MEDIA_NOT_FOUND"
-      ? "MEDIA_NOT_FOUND"
-      : "TELEGRAM_METADATA_ERROR";
-    return mediaError(
-      code === "MEDIA_NOT_FOUND" ? 404 : 503,
-      code,
-      request.headers.get("origin") || "",
-      env,
-      error?.message
-    );
-  }
-
-  const document = message?.media?.document;
-  const size = Number(document?.size);
-  if (!document || !Number.isSafeInteger(size) || size <= 0) {
-    return mediaError(
-      404,
-      "TELEGRAM_FILE_METADATA_MISSING",
-      request.headers.get("origin") || "",
-      env
-    );
-  }
-
-  const range = parseSingleRange(
-    request.headers.get("range"),
-    size,
-    MEDIA_CHUNK_SIZE
-  );
-  if (range.error) {
-    const headers = new Headers({
-      "Content-Range": "bytes */" + size,
-      "Accept-Ranges": "bytes",
-    });
-    applyCors(
-      headers,
-      request.headers.get("origin") || "",
-      env,
-      { publicMedia: !isProtected }
-    );
-    return new Response(null, { status: 416, headers });
-  }
-
-  const meta = {
-    messageId: Number(messageId),
-    messageDate: Number(message.date || 0),
-    document,
-    size,
-  };
-
   const origin = request.headers.get("origin") || "";
-  const headers = buildMediaHeaders(
-    meta,
-    kind,
-    range,
-    isProtected && !access.viaPreview,
-    origin,
-    env
-  );
+  const canCache = !isProtected && request.method === "GET";
 
-  if (request.method === "HEAD") {
-    headers.set("Content-Length", String(range.length));
-    await client.disconnect().catch(() => {});
-    client = null;
-    return new Response(null, {
-      status: range.partial ? 206 : 200,
-      headers,
-    });
-  }
-
-  const cache = caches.default;
-  const canCache = !isProtected && request.method === "GET" && range.requested;
-  if (canCache) {
-    const hit = await getCachedMedia(cache, request, kind, Number(messageId), range);
-    if (hit) {
-      const hitHeaders = new Headers(hit.headers);
-      applyCors(hitHeaders, origin, env, { publicMedia: true });
-      return new Response(hit.body, {
-        status: hit.status,
-        headers: hitHeaders,
-      });
+  // Public range hits can be served without opening a Telegram TCP socket.
+  const rangeHint = request.headers.get("range");
+  if (canCache && rangeHint) {
+    const parsedRange = parseSingleRange(rangeHint, Number.MAX_SAFE_INTEGER, MEDIA_CHUNK_SIZE);
+    // Do not trust the hint for lookup unless the actual Telegram file size is known;
+    // therefore this fast path intentionally skips malformed/ambiguous ranges.
+    if (!parsedRange.error && parsedRange.requested) {
+      // Metadata is still required to know the actual file size, so cache lookup
+      // happens after metadata below. This branch only documents the safe policy.
     }
   }
 
+  let client = null;
+  let handedOffToStream = false;
+
   try {
+    client = await createTelegramClient(env);
+    const message = await getTelegramMessage(Number(messageId), client);
+    const document = message?.media?.document;
+    const size = Number(document?.size);
+
+    if (!document || !Number.isSafeInteger(size) || size <= 0) {
+      return mediaError(404, "TELEGRAM_FILE_METADATA_MISSING", origin, env);
+    }
+
+    const range = parseSingleRange(
+      request.headers.get("range"),
+      size,
+      MEDIA_CHUNK_SIZE
+    );
+
+    if (range.error) {
+      const headers = new Headers({
+        "Content-Range": "bytes */" + size,
+        "Accept-Ranges": "bytes",
+      });
+      applyCors(headers, origin, env, { publicMedia: !isProtected });
+      return new Response(null, { status: 416, headers });
+    }
+
+    const meta = {
+      messageId: Number(messageId),
+      messageDate: Number(message.date || 0),
+      document,
+      size,
+    };
+
+    const headers = buildMediaHeaders(
+      meta,
+      kind,
+      range,
+      isProtected && !isPreview,
+      origin,
+      env
+    );
+
+    if (request.method === "HEAD") {
+      await client.disconnect().catch(() => {});
+      client = null;
+
+      return new Response(null, {
+        status: range.partial ? 206 : 200,
+        headers,
+      });
+    }
+
+    const cache = caches.default;
+    const rangeCanCache = !isProtected && range.requested;
+
+    if (rangeCanCache) {
+      const hit = await getCachedMedia(
+        cache,
+        request,
+        kind,
+        Number(messageId),
+        range
+      );
+
+      if (hit) {
+        await client.disconnect().catch(() => {});
+        client = null;
+
+        const hitHeaders = new Headers(hit.headers);
+        applyCors(hitHeaders, origin, env, { publicMedia: true });
+
+        return new Response(hit.body, {
+          status: hit.status,
+          headers: hitHeaders,
+        });
+      }
+    }
+
     const body = createTelegramMediaStream(
       client,
       message,
@@ -842,40 +852,51 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       headers,
     });
 
-    if (canCache) {
+    if (rangeCanCache) {
       ctx.waitUntil(
         cache
           .put(
             mediaCacheKey(request, kind, Number(messageId), range),
             response.clone()
           )
-          .catch(() => {})
+          .catch((error) => {
+            console.warn("HJ Telegram edge-cache put failed", {
+              messageId: Number(messageId),
+              error: String(error?.message || error).slice(0, 160),
+            });
+          })
       );
     }
 
     return response;
   } catch (error) {
-    if (client && !handedOffToStream) await client.disconnect().catch(() => {});
-    if (error?.name === "AbortError") {
-      return new Response(null, { status: 499, headers });
+    if (client && !handedOffToStream) {
+      await client.disconnect().catch(() => {});
     }
 
-    console.error("HJ Telegram media stream error", {
+    console.error("HJ Telegram media request error", {
       kind,
       messageId: Number(messageId),
       error: String(error?.message || error).slice(0, 200),
     });
 
+    if (error?.name === "AbortError") {
+      return new Response(null, { status: 499 });
+    }
+
+    const code = error?.code === "MEDIA_NOT_FOUND"
+      ? "MEDIA_NOT_FOUND"
+      : "TELEGRAM_MEDIA_REQUEST_ERROR";
+
     return mediaError(
-      502,
-      "TELEGRAM_MEDIA_STREAM_ERROR",
+      code === "MEDIA_NOT_FOUND" ? 404 : 502,
+      code,
       origin,
       env,
       error?.message
     );
   }
 }
-
 async function handleTelegramMessages(request, env) {
   const origin = request.headers.get("origin") || "";
   const authHeader = request.headers.get("authorization") || "";
