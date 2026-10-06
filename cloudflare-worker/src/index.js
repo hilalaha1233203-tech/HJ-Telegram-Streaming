@@ -813,16 +813,30 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       });
     }
 
-    const body = createTelegramMediaStream(
+    const rawBody = createTelegramMediaStream(
       client,
       message,
       range.start,
       range.requested ? range.length : null,
       request.signal
     );
+
+    // Browser media clients are sensitive to accurate range framing. A normal
+    // ReadableStream response uses chunked transfer encoding in Workers and
+    // ignores a manually supplied Content-Length. FixedLengthStream makes the
+    // exact range length part of the response framing and also detects early
+    // EOF / overrun.
+    const fixedLength = new FixedLengthStream(range.length);
+    rawBody.pipeTo(fixedLength.writable).catch((error) => {
+      console.error("HJ Telegram fixed-length media pipe error", {
+        messageId: message?.id,
+        error: String(error?.message || error).slice(0, 200),
+      });
+    });
+
     handedOffToStream = true;
 
-    const response = new Response(body, {
+    const response = new Response(fixedLength.readable, {
       status: range.requested ? 206 : 200,
       headers,
     });
