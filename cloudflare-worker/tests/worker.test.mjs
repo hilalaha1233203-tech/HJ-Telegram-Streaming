@@ -38,7 +38,7 @@ function installWorkerFetch({ size = 1024 * 1024, accessType = "free", messageId
     const headers = new Headers(init?.headers || input?.headers || {});
     calls.push({ url, headers });
 
-    if (url.startsWith("https://supabase.example/rest/v1/episodes?")) {
+    if (url.includes("/rest/v1/episodes?")) {
       return mockResponse(
         JSON.stringify([{ id: 9001, access_type: accessType, available: true, number: 1 }]),
         200,
@@ -46,7 +46,7 @@ function installWorkerFetch({ size = 1024 * 1024, accessType = "free", messageId
       );
     }
 
-    if (url.startsWith("https://supabase.example/rest/v1/telegram_media_index?")) {
+    if (url.includes("/rest/v1/telegram_media_index?")) {
       return mockResponse(
         JSON.stringify([{
           storage_chat_id: -100123,
@@ -181,6 +181,42 @@ test("HEAD media route returns exact metadata without Bot API download", async (
   }
 });
 
+test("Worker can use a separate media-index Supabase project", async () => {
+  const mock = installWorkerFetch({ size: 1024 * 1024 });
+  try {
+    const response = await worker.fetch(
+      new Request("https://worker.example/audio/message/7", {
+        headers: { Range: "bytes=0-127" },
+      }),
+      {
+        SUPABASE_URL: "https://web-supabase.example",
+        SUPABASE_PUBLISHABLE_KEY: "publishable",
+        SUPABASE_SERVICE_ROLE_KEY: "web-service-unused",
+        MEDIA_INDEX_SUPABASE_URL: "https://index-supabase.example",
+        MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY: "index-service",
+        TELEGRAM_BOT_TOKEN: "TEST_TOKEN",
+      },
+      { waitUntil() {} }
+    );
+    assert.equal(response.status, 206);
+    assert.equal(
+      mock.calls.some((call) =>
+        call.url.startsWith("https://web-supabase.example/rest/v1/episodes?")
+      ),
+      true
+    );
+    assert.equal(
+      mock.calls.some((call) =>
+        call.url.startsWith("https://index-supabase.example/rest/v1/telegram_media_index?")
+      ),
+      true
+    );
+    assert.equal((await response.arrayBuffer()).byteLength, 128);
+  } finally {
+    mock.restore();
+  }
+});
+
 test("GET range 1 returns 206 with the requested 512 KiB body", async () => {
   const mock = installWorkerFetch({ size: 2 * 1024 * 1024 });
   try {
@@ -192,9 +228,10 @@ test("GET range 1 returns 206 with the requested 512 KiB body", async () => {
         },
       }),
       {
-        SUPABASE_URL: "https://supabase.example",
+        SUPABASE_URL: "https://web-supabase.example",
         SUPABASE_PUBLISHABLE_KEY: "publishable",
-        SUPABASE_SERVICE_ROLE_KEY: "service",
+        MEDIA_INDEX_SUPABASE_URL: "https://index-supabase.example",
+        MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY: "index-service",
         TELEGRAM_BOT_TOKEN: "TEST_TOKEN",
         STORAGE_CHAT_ID: "-100123",
       },
