@@ -1,0 +1,9 @@
+TELEGRAM_API_ID=
+TELEGRAM_API_HASH=
+TELEGRAM_SESSION=
+CHANNEL_ID=
+MEDIA_TICKET_SECRET=
+SUPABASE_URL=https://yajkfglagnyvenddyvok.supabase.co
+SUPABASE_PUBLISHABLE_KEY=
+HJ_WEB_BASE_URL=https://hj-groups-web.vercel.app
+CORS_ALLOWED_ORIGINS=https://hj-groups-web.vercel.app,https://hj-groups-website.getvoroa.com,http://localhost:5173,http://127.0.0.1:5173
