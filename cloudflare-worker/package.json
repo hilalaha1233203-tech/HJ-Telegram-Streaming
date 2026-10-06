@@ -1,0 +1,18 @@
+{
+  "name": "hj-telegram-streaming-cloudflare",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "HJ GROUPS direct Telegram MTProto media gateway for Cloudflare Workers",
+  "scripts": {
+    "check": "node --check src/pure.js && node --check src/index.js",
+    "test": "node --test tests/pure.test.mjs",
+    "dry-run": "wrangler deploy --dry-run --outdir .wrangler-dry-run"
+  },
+  "dependencies": {
+    "teleproto": "1.229.0"
+  },
+  "devDependencies": {
+    "wrangler": "4.146.0"
+  }
+}
