@@ -657,7 +657,20 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
         );
 
         const data = Buffer.from(chunk || "");
+        console.log("HJ Telegram media chunk", {
+          messageId: message?.id,
+          requestedOffset: offset,
+          requestedBytes: requestSize,
+          receivedBytes: data.length,
+          remaining,
+        });
         if (!data.length) {
+          console.error("HJ Telegram media returned empty chunk", {
+            messageId: message?.id,
+            requestedOffset: offset,
+            requestedBytes: requestSize,
+            dcId: routeDc,
+          });
           cleanup();
           await closeClient();
           controller.close();
