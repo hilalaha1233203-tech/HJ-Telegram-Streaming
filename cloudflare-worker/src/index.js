@@ -788,7 +788,7 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       env
     );
 
-      if (request.method === "HEAD") {
+    if (request.method === "HEAD") {
       return new Response(null, {
         status: range.partial ? 206 : 200,
         headers,
@@ -871,8 +871,13 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       env,
       error?.message
     );
+  } finally {
+    if (client && !handedOffToStream) {
+      await client.disconnect().catch(() => {});
+    }
   }
 }
+
 async function handleTelegramMessages(request, env) {
   const origin = request.headers.get("origin") || "";
   const authHeader = request.headers.get("authorization") || "";
