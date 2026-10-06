@@ -613,6 +613,7 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
       id: document.id,
       accessHash: document.accessHash,
       fileReference: document.fileReference,
+      thumbSize: "",
     });
   };
 
