@@ -60,8 +60,36 @@ function serverKey(env) {
   return envString(env, "SUPABASE_SERVICE_ROLE_KEY");
 }
 
-async function supabaseJson(env, pathname, key, authHeader = "") {
-  const base = envString(env, "SUPABASE_URL");
+function mediaIndexUrl(env) {
+  const value = envString(env, "MEDIA_INDEX_SUPABASE_URL") || envString(env, "SUPABASE_URL");
+  if (!value) throw new Error("Missing required environment variables: MEDIA_INDEX_SUPABASE_URL or SUPABASE_URL");
+  return value;
+}
+
+function mediaIndexKey(env) {
+  const value =
+    envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") ||
+    envString(env, "SUPABASE_SERVICE_ROLE_KEY");
+  if (!value) {
+    throw new Error(
+      "Missing required environment variables: MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY"
+    );
+  }
+  return value;
+}
+
+async function mediaIndexJson(env, pathname) {
+  return supabaseJson(
+    env,
+    pathname,
+    mediaIndexKey(env),
+    "",
+    mediaIndexUrl(env)
+  );
+}
+
+async function supabaseJson(env, pathname, key, authHeader = "", baseOverride = "") {
+  const base = String(baseOverride || envString(env, "SUPABASE_URL")).trim();
   const headers = {
     apikey: key,
     Accept: "application/json",
@@ -95,10 +123,9 @@ async function getIndexedMedia(env, kind, messageId) {
   if (Number.isSafeInteger(storageChatId) && storageChatId !== 0) {
     params.set("storage_chat_id", "eq." + String(storageChatId));
   }
-  const rows = await supabaseJson(
+  const rows = await mediaIndexJson(
     env,
-    "/rest/v1/telegram_media_index?" + params.toString(),
-    serverKey(env)
+    "/rest/v1/telegram_media_index?" + params.toString()
   );
   return Array.isArray(rows) ? rows[0] || null : null;
 }
@@ -593,10 +620,9 @@ async function handleTelegramMessages(request, env) {
       limit: String(limit),
     });
     if (offsetId > 0) params.set("telegram_message_id", "lt." + String(offsetId));
-    const rows = await supabaseJson(
+    const rows = await mediaIndexJson(
       env,
-      "/rest/v1/telegram_media_index?" + params.toString(),
-      serverKey(env)
+      "/rest/v1/telegram_media_index?" + params.toString()
     );
     const mediaMessages = Array.isArray(rows)
       ? rows.map((row) => ({
@@ -641,9 +667,20 @@ async function handleTelegramStatus(request, env) {
     "TELEGRAM_BOT_TOKEN",
     "SUPABASE_URL",
     "SUPABASE_PUBLISHABLE_KEY",
-    "SUPABASE_SERVICE_ROLE_KEY",
   ]) {
     if (!envString(env, key)) missing.push(key);
+  }
+  if (!envString(env, "MEDIA_INDEX_SUPABASE_URL") && !envString(env, "SUPABASE_URL")) {
+    missing.push("MEDIA_INDEX_SUPABASE_URL");
+  }
+  if (
+    !envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") &&
+    !envString(env, "SUPABASE_SERVICE_ROLE_KEY")
+  ) {
+    missing.push("MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY");
+  }
+  if (!envString(env, "SUPABASE_SERVICE_ROLE_KEY") && !envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY")) {
+    missing.push("SUPABASE_SERVICE_ROLE_KEY");
   }
   const configured = missing.length === 0;
   return jsonResponse(
@@ -652,7 +689,7 @@ async function handleTelegramStatus(request, env) {
       telegramConfigured: Boolean(envString(env, "TELEGRAM_BOT_TOKEN")),
       botApiStreaming: true,
       mediaIndexConfigured: Boolean(
-        envString(env, "SUPABASE_URL") && envString(env, "SUPABASE_SERVICE_ROLE_KEY")
+        mediaIndexUrl(env) && mediaIndexKey(env)
       ),
       missing,
     },
