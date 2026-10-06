@@ -1061,11 +1061,12 @@ async function handleMediaTicket(request, env) {
   try {
     const access = await inspectMediaAccess(env, request, type, messageId);
     if (!access.ok) {
-      return jsonResponse(
-        { error: access.error || "Unable to verify protected media access." },
+      return mediaError(
         access.status || 403,
+        "MEDIA_ACCESS_DENIED",
         request.headers.get("origin") || "",
-        env
+        env,
+        access.error
       );
     }
 
