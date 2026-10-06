@@ -682,15 +682,22 @@ async function handleTelegramStatus(request, env) {
   if (!envString(env, "SUPABASE_SERVICE_ROLE_KEY") && !envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY")) {
     missing.push("SUPABASE_SERVICE_ROLE_KEY");
   }
+  const hasMediaIndexUrl = Boolean(
+    envString(env, "MEDIA_INDEX_SUPABASE_URL") || envString(env, "SUPABASE_URL")
+  );
+  const hasMediaIndexKey = Boolean(
+    envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") ||
+    envString(env, "SUPABASE_SERVICE_ROLE_KEY")
+  );
+  if (!hasMediaIndexUrl) missing.push("MEDIA_INDEX_SUPABASE_URL");
+  if (!hasMediaIndexKey) missing.push("MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY");
   const configured = missing.length === 0;
   return jsonResponse(
     {
       ok: configured,
       telegramConfigured: Boolean(envString(env, "TELEGRAM_BOT_TOKEN")),
       botApiStreaming: true,
-      mediaIndexConfigured: Boolean(
-        mediaIndexUrl(env) && mediaIndexKey(env)
-      ),
+      mediaIndexConfigured: hasMediaIndexUrl && hasMediaIndexKey,
       missing,
     },
     configured ? 200 : 503,
