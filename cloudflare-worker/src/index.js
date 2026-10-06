@@ -2,7 +2,6 @@ import { TelegramClient } from "teleproto";
 import { StringSession } from "teleproto/sessions/index.js";
 import { createHmac, createHash, timingSafeEqual } from "node:crypto";
 import {
-  MEDIA_CACHE_TTL,
   MEDIA_CHUNK_SIZE,
   MEDIA_METADATA_TTL_MS,
   MEDIA_TICKET_TTL_MS,
@@ -175,7 +174,7 @@ function buildMediaHeaders(meta, kind, range, isProtected, origin, env) {
   headers.set("Content-Type", mimeType);
   headers.set("Accept-Ranges", "bytes");
   headers.set("Content-Disposition", 'inline; filename="' + asciiName + '"; filename*=UTF-8\'\'' + encodeDispositionFilename(filename));
-  headers.set("Cache-Control", isProtected ? "private, no-store" : "public, max-age=" + MEDIA_CACHE_TTL + ", immutable");
+  headers.set("Cache-Control", "private, no-store");
   headers.set("ETag", '"tg-' + kind + '-' + meta.messageId + '-' + meta.size + '"');
   if (meta.messageDate) {
     headers.set("Last-Modified", new Date(meta.messageDate * 1000).toUTCString());
@@ -191,28 +190,6 @@ function buildMediaHeaders(meta, kind, range, isProtected, origin, env) {
   return headers;
 }
 
-function mediaCacheKey(request, kind, messageId, range) {
-  const url = new URL(request.url);
-  return new Request(
-    "https://hj-media-cache.invalid/v1/" +
-      encodeURIComponent(kind) +
-      "/" +
-      encodeURIComponent(messageId) +
-      "/" +
-      encodeURIComponent(range.start) +
-      "-" +
-      encodeURIComponent(range.end)
-  );
-}
-
-async function getCachedMedia(cache, request, kind, messageId, range) {
-  if (request.method !== "GET") return null;
-  try {
-    return await cache.match(mediaCacheKey(request, kind, messageId, range));
-  } catch {
-    return null;
-  }
-}
 
 function parseAccessTypes(raw) {
   if (Array.isArray(raw)) {
@@ -795,29 +772,6 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       });
     }
 
-    const cache = caches.default;
-    const rangeCanCache = !isProtected && range.requested;
-
-    if (rangeCanCache) {
-      const hit = await getCachedMedia(
-        cache,
-        request,
-        kind,
-        Number(messageId),
-        range
-      );
-
-      if (hit) {
-        const hitHeaders = new Headers(hit.headers);
-        applyCors(hitHeaders, origin, env, { publicMedia: true });
-
-        return new Response(hit.body, {
-          status: hit.status,
-          headers: hitHeaders,
-        });
-      }
-    }
-
     const body = createTelegramMediaStream(
       client,
       message,
@@ -831,22 +785,6 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       status: range.requested ? 206 : 200,
       headers,
     });
-
-    if (rangeCanCache) {
-      ctx.waitUntil(
-        cache
-          .put(
-            mediaCacheKey(request, kind, Number(messageId), range),
-            response.clone()
-          )
-          .catch((error) => {
-            console.warn("HJ Telegram edge-cache put failed", {
-              messageId: Number(messageId),
-              error: String(error?.message || error).slice(0, 160),
-            });
-          })
-      );
-    }
 
     return response;
   } catch (error) {
