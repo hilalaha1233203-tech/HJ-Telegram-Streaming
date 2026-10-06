@@ -622,9 +622,12 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
         }
 
         if (!generator) {
+          // teleproto's iterDownload "limit" is not a byte count. Passing the
+          // requested byte length here can switch iterator implementations and
+          // break non-zero range requests. We bound the response ourselves by
+          // truncating/enforcing "remaining" below.
           generator = client.iterDownload(message, {
             offset: startOffset,
-            limit: remaining == null ? undefined : remaining,
             requestSize: MEDIA_CHUNK_SIZE,
             signal: streamAbort.signal,
           });
