@@ -47,5 +47,5 @@ test("media ticket route is matched separately", async () => {
   );
   assert.equal(response.status, 503);
   const payload = await response.json();
-  assert.ok(payload.error === "MEDIA_TICKET_ERROR" || payload.error === "MEDIA_ACCESS_DENIED");
+  assert.equal(payload.error, "MEDIA_ACCESS_DENIED");
 });
