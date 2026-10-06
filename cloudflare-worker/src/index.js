@@ -91,6 +91,10 @@ async function getIndexedMedia(env, kind, messageId) {
     media_kind: "eq." + String(kind),
     limit: "1",
   });
+  const storageChatId = Number(envString(env, "STORAGE_CHAT_ID"));
+  if (Number.isSafeInteger(storageChatId) && storageChatId !== 0) {
+    params.set("storage_chat_id", "eq." + String(storageChatId));
+  }
   const rows = await supabaseJson(
     env,
     "/rest/v1/telegram_media_index?" + params.toString(),
