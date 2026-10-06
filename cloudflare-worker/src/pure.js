@@ -1,4 +1,4 @@
-export const MEDIA_CHUNK_SIZE = 512 * 1024;
+export const MEDIA_CHUNK_SIZE = 1024 * 1024;
 export const MEDIA_TICKET_TTL_MS = 5 * 60 * 1000;
 export const MEDIA_CACHE_TTL = 31_536_000;
 export const MEDIA_METADATA_TTL_MS = 5 * 60 * 1000;
