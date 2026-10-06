@@ -24,11 +24,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://127.0.0.1:5173",
 ];
 
-let telegramClientPromise = null;
 const mediaMetadataCache = new Map();
-const telegramOperationQueue = [];
-let telegramOperationsActive = 0;
-const MAX_TELEGRAM_OPERATIONS = 2;
 
 function envString(env, key, fallback = "") {
   const value = env?.[key];
@@ -67,81 +63,55 @@ function requireEnv(env, keys) {
   }
 }
 
-async function withTelegramSlot(task) {
-  return new Promise((resolve, reject) => {
-    telegramOperationQueue.push({ task, resolve, reject });
-    pumpTelegramQueue();
-  });
-}
+async function createTelegramClient(env) {
+  requireEnv(env, [
+    "TELEGRAM_API_ID",
+    "TELEGRAM_API_HASH",
+    "TELEGRAM_SESSION",
+    "CHANNEL_ID",
+  ]);
 
-function pumpTelegramQueue() {
-  while (
-    telegramOperationsActive < MAX_TELEGRAM_OPERATIONS &&
-    telegramOperationQueue.length
-  ) {
-    const item = telegramOperationQueue.shift();
-    telegramOperationsActive += 1;
-    Promise.resolve()
-      .then(item.task)
-      .then(item.resolve, item.reject)
-      .finally(() => {
-        telegramOperationsActive -= 1;
-        pumpTelegramQueue();
-      });
+  const apiId = Number(envString(env, "TELEGRAM_API_ID"));
+  const apiHash = envString(env, "TELEGRAM_API_HASH");
+  const session = envString(env, "TELEGRAM_SESSION");
+  const channelId = Number(envString(env, "CHANNEL_ID"));
+
+  if (!Number.isSafeInteger(apiId) || apiId <= 0) {
+    throw new Error("TELEGRAM_API_ID must be a positive integer");
   }
-}
+  if (!apiHash) throw new Error("TELEGRAM_API_HASH is empty");
+  if (!session) throw new Error("TELEGRAM_SESSION is empty");
+  if (!Number.isSafeInteger(channelId) || channelId === 0) {
+    throw new Error("CHANNEL_ID must be a valid Telegram channel id");
+  }
 
-async function getTelegramClient(env) {
-  if (telegramClientPromise) return telegramClientPromise;
-
-  telegramClientPromise = (async () => {
-    requireEnv(env, [
-      "TELEGRAM_API_ID",
-      "TELEGRAM_API_HASH",
-      "TELEGRAM_SESSION",
-      "CHANNEL_ID",
-    ]);
-
-    const apiId = Number(envString(env, "TELEGRAM_API_ID"));
-    const apiHash = envString(env, "TELEGRAM_API_HASH");
-    const session = envString(env, "TELEGRAM_SESSION");
-    const channelId = Number(envString(env, "CHANNEL_ID"));
-
-    if (!Number.isSafeInteger(apiId) || apiId <= 0) {
-      throw new Error("TELEGRAM_API_ID must be a positive integer");
+  const client = new TelegramClient(
+    new StringSession(session),
+    apiId,
+    apiHash,
+    {
+      connectionRetries: 3,
+      reconnectRetries: 3,
+      requestRetries: 4,
+      downloadRetries: 4,
+      timeout: 10,
+      retryDelay: 500,
+      autoReconnect: true,
+      maxConcurrentDownloads: 1,
+      downloadPool: {
+        maxSessions: 1,
+        sessions: 1,
+        inflightPerDc: 1,
+      },
+      deviceModel: "HJ GROUPS Cloudflare Worker",
+      systemVersion: "Cloudflare Workers",
+      appVersion: "1.0.0",
+      langCode: "en",
+      systemLangCode: "en",
     }
-    if (!apiHash) throw new Error("TELEGRAM_API_HASH is empty");
-    if (!session) throw new Error("TELEGRAM_SESSION is empty");
-    if (!Number.isSafeInteger(channelId) || channelId === 0) {
-      throw new Error("CHANNEL_ID must be a valid Telegram channel id");
-    }
+  );
 
-    const client = new TelegramClient(
-      new StringSession(session),
-      apiId,
-      apiHash,
-      {
-        connectionRetries: 3,
-        reconnectRetries: 3,
-        requestRetries: 4,
-        downloadRetries: 4,
-        timeout: 10,
-        retryDelay: 500,
-        autoReconnect: true,
-        maxConcurrentDownloads: 1,
-        downloadPool: {
-          maxSessions: 1,
-          sessions: 1,
-          inflightPerDc: 1,
-        },
-        deviceModel: "HJ GROUPS Cloudflare Worker",
-        systemVersion: "Cloudflare Workers",
-        appVersion: "1.0.0",
-        langCode: "en",
-        systemLangCode: "en",
-      }
-    );
-
+  try {
     await client.connect();
 
     if (!(await client.isUserAuthorized())) {
@@ -150,15 +120,13 @@ async function getTelegramClient(env) {
 
     client.__hjChannelId = channelId;
     return client;
-  })().catch((error) => {
-    telegramClientPromise = null;
+  } catch (error) {
+    await client.disconnect().catch(() => {});
     throw error;
-  });
-
-  return telegramClientPromise;
+  }
 }
 
-function cacheMetadata(key, message) {
+function cacheMetadata(key, message) {(key, message) {
   mediaMetadataCache.set(key, {
     message,
     expiresAt: Date.now() + MEDIA_METADATA_TTL_MS,
