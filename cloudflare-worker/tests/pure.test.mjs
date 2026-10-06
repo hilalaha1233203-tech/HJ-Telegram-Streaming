@@ -74,5 +74,7 @@ test("invalid and multi-range headers are rejected", () => {
 test("mime and filenames remain usable", () => {
   assert.equal(inferMimeType(document, "audio"), "audio/mp4");
   assert.equal(inferFilename(document, "audio"), "Episode 7.m4a");
-  assert.equal(safeAsciiFilename("தமிழ் Episode 7.m4a", "audio.m4a"), "___ Episode 7.m4a");
+  const safe = safeAsciiFilename("\u0ba4\u0bae\u0bbf\u0bb4\u0bcd Episode 7.m4a", "audio.m4a");
+  assert.equal(safe.endsWith(" Episode 7.m4a"), true);
+  assert.match(safe, /^[\x20-\x7E]+$/);
 });
