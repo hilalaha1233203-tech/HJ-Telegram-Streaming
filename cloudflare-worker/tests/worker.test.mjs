@@ -32,7 +32,8 @@ test("worker health route works without Telegram secrets", async () => {
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.status, "ok");
-  assert.equal(payload.directTelegram, true);
+  assert.equal(payload.directTelegram, false);
+  assert.equal(payload.botApiStreaming, true);
 });
 
 test("media route is matched and validates its message id", async () => {
