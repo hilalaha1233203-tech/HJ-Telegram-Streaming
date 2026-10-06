@@ -26,9 +26,12 @@ jobs:
 
 
       - name: Live Telegram runtime configuration
+        if: ${{ vars.STREAMING_SERVER_URL != '' }}
+        env:
+          STREAMING_SERVER_URL: ${{ vars.STREAMING_SERVER_URL }}
         run: |
           node <<'NODE'
-          const url = 'https://hj-telegram-streaming.onrender.com/telegram/status'
+          const url = process.env.STREAMING_SERVER_URL.replace(/\/+$/, '') + '/telegram/status'
           const response = await fetch(url, {
             headers: { Accept: 'application/json' },
             redirect: 'manual',
@@ -45,9 +48,12 @@ jobs:
           NODE
 
       - name: Live production CORS preflight
+        if: ${{ vars.STREAMING_SERVER_URL != '' }}
+        env:
+          STREAMING_SERVER_URL: ${{ vars.STREAMING_SERVER_URL }}
         run: |
           node <<'NODE'
-          const url = 'https://hj-telegram-streaming.onrender.com/telegram/messages'
+          const url = process.env.STREAMING_SERVER_URL.replace(/\/+$/, '') + '/telegram/messages'
           const origin = 'https://hj-groups-website.getvoroa.com'
           const response = await fetch(url, {
             method: 'OPTIONS',
