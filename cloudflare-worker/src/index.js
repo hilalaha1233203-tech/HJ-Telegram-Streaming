@@ -201,22 +201,6 @@ async function getTelegramMessage(env, messageId) {
   });
 }
 
-function normalizeDocument(message) {
-  const document = message?.media?.document;
-  if (!document) return null;
-
-  const rawSize = Number(document.size);
-  if (!Number.isSafeInteger(rawSize) || rawSize <= 0) return null;
-
-  return {
-    document,
-    size: rawSize,
-    mimeType: inferMimeType(document),
-    filename: inferFilename(document, "audio"),
-    dcId: Number(document.dcId || 0),
-  };
-}
-
 function buildMediaHeaders(meta, kind, range, isProtected, origin, env) {
   const headers = new Headers();
   const filename = inferFilename(meta.document, kind);
@@ -1070,12 +1054,8 @@ async function handleMediaTicket(request, env) {
       request.headers.get("user-agent") || ""
     );
 
-    const base = request.url.replace(/\/+$/, "");
     const mediaUrl =
-      base.replace(
-        /\/media-ticket\//,
-        "/" + type + "/message/"
-      ) +
+      new URL("/" + type + "/message/" + messageId, request.url).toString() +
       "?ticket=" +
       encodeURIComponent(token);
 
@@ -1194,7 +1174,7 @@ export default {
         return handleMediaTicket(request, env);
       }
 
-      if (parts.length === 4 && ["audio", "video", "document"].includes(parts[0]) && parts[1] === "message") {
+      if (parts.length === 3 && ["audio", "video", "document"].includes(parts[0]) && parts[1] === "message") {
         return handleMedia(request, env, ctx, parts[0], parts[2]);
       }
 
