@@ -16,12 +16,15 @@ Set these in Cloudflare; never commit them:
 - STORAGE_CHAT_ID (recommended when multiple storage channels exist)
 - SUPABASE_URL
 - SUPABASE_PUBLISHABLE_KEY
-- SUPABASE_SERVICE_ROLE_KEY
+- SUPABASE_SERVICE_ROLE_KEY (fallback for the index if both databases are the same)
+- MEDIA_INDEX_SUPABASE_URL (recommended when Store Keeper and website use different Supabase projects)
+- MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY (server-only key for the Store Keeper index project)
 - HJ_WEB_BASE_URL
 - MEDIA_TICKET_SECRET
 - CORS_ALLOWED_ORIGINS
 
-The SUPABASE_SERVICE_ROLE_KEY is only used server-side to read telegram_media_index. Never expose it to the browser.
+The website database is used for content/access policy (`episodes`, `video_episodes`, `books`). The Store Keeper database contains the server-only `telegram_media_index`. When those are different Supabase projects, set `MEDIA_INDEX_SUPABASE_URL` and `MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY`; otherwise the Worker falls back to the regular Supabase URL/service key.
+Never expose any service-role key to the browser.
 
 ## Media requirement
 
