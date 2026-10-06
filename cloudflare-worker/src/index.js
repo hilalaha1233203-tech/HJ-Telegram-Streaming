@@ -744,20 +744,6 @@ async function handleMedia(request, env, ctx, kind, messageId) {
   }
 
   const origin = request.headers.get("origin") || "";
-  const canCache = !isProtected && request.method === "GET";
-
-  // Public range hits can be served without opening a Telegram TCP socket.
-  const rangeHint = request.headers.get("range");
-  if (canCache && rangeHint) {
-    const parsedRange = parseSingleRange(rangeHint, Number.MAX_SAFE_INTEGER, MEDIA_CHUNK_SIZE);
-    // Do not trust the hint for lookup unless the actual Telegram file size is known;
-    // therefore this fast path intentionally skips malformed/ambiguous ranges.
-    if (!parsedRange.error && parsedRange.requested) {
-      // Metadata is still required to know the actual file size, so cache lookup
-      // happens after metadata below. This branch only documents the safe policy.
-    }
-  }
-
   let client = null;
   let handedOffToStream = false;
 
@@ -802,10 +788,7 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       env
     );
 
-    if (request.method === "HEAD") {
-      await client.disconnect().catch(() => {});
-      client = null;
-
+      if (request.method === "HEAD") {
       return new Response(null, {
         status: range.partial ? 206 : 200,
         headers,
@@ -825,9 +808,6 @@ async function handleMedia(request, env, ctx, kind, messageId) {
       );
 
       if (hit) {
-        await client.disconnect().catch(() => {});
-        client = null;
-
         const hitHeaders = new Headers(hit.headers);
         applyCors(hitHeaders, origin, env, { publicMedia: true });
 
@@ -870,10 +850,6 @@ async function handleMedia(request, env, ctx, kind, messageId) {
 
     return response;
   } catch (error) {
-    if (client && !handedOffToStream) {
-      await client.disconnect().catch(() => {});
-    }
-
     console.error("HJ Telegram media request error", {
       kind,
       messageId: Number(messageId),
@@ -928,13 +904,12 @@ async function handleTelegramMessages(request, env) {
     ? requestedType
     : "audio";
 
+  let client = null;
   try {
-    const client = await getTelegramClient(env);
-    const messages = await withTelegramSlot(async () => {
-      const params = { limit };
-      if (offsetId > 0) params.offsetId = offsetId;
-      return client.getMessages(client.__hjChannelId, params);
-    });
+    client = await createTelegramClient(env);
+    const params = { limit };
+    if (offsetId > 0) params.offsetId = offsetId;
+    const messages = await client.getMessages(client.__hjChannelId, params);
 
     const mediaMessages = [];
     for (const msg of messages || []) {
@@ -1047,6 +1022,8 @@ async function handleTelegramMessages(request, env) {
       origin,
       env
     );
+  } finally {
+    if (client) await client.disconnect().catch(() => {});
   }
 }
 
@@ -1146,10 +1123,12 @@ async function handleTelegramStatus(request, env) {
 
   if (new URL(request.url).searchParams.get("ping") === "1" && configured) {
     try {
-      const client = await getTelegramClient(env);
-      await withTelegramSlot(() =>
-        client.getMessages(client.__hjChannelId, { ids: [1] })
-      );
+      const client = await createTelegramClient(env);
+      try {
+        await client.getMessages(client.__hjChannelId, { ids: [1] });
+      } finally {
+        await client.disconnect().catch(() => {});
+      }
     } catch {
       return jsonResponse(
         { ok: false, telegramConfigured: true, telegramReachable: false },
@@ -1164,7 +1143,7 @@ async function handleTelegramStatus(request, env) {
     {
       ok: configured,
       telegramConfigured: configured,
-      telegramReachable: configured && Boolean(telegramClientPromise),
+      telegramReachable: null,
       missing,
     },
     configured ? 200 : 503,
