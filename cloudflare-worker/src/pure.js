@@ -17,12 +17,11 @@ export function parseSingleRange(header, size, maxBytes = MEDIA_CHUNK_SIZE) {
 
   const raw = String(header ?? "").trim();
   if (!raw) {
-    const length = Math.min(fileSize, maxBytes);
     return {
       start: 0,
-      end: length - 1,
-      length,
-      partial: fileSize > length,
+      end: fileSize - 1,
+      length: fileSize,
+      partial: false,
       requested: false,
     };
   }
