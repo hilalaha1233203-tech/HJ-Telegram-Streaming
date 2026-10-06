@@ -1,4 +1,4 @@
-import { TelegramClient } from "teleproto";
+import { Api, TelegramClient } from "teleproto";
 import { StringSession } from "teleproto/sessions/index.js";
 import { createHmac, createHash, timingSafeEqual } from "node:crypto";
 import {
@@ -587,9 +587,10 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
   };
 
   const streamAbort = new AbortController();
-  let generator = null;
-  let remaining = byteLength == null ? null : Number(byteLength);
   let cleaned = false;
+  let offset = Number(startOffset) || 0;
+  let remaining = byteLength == null ? null : Number(byteLength);
+  let routeDc = Number(message?.media?.document?.dcId || client.session?.dcId || 0);
 
   const cleanup = () => {
     if (cleaned) return;
@@ -605,9 +606,14 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
     requestSignal?.addEventListener("abort", onRequestAbort, { once: true });
   }
 
-  const finishGenerator = async () => {
-    try { await generator?.return?.(); } catch {}
-    generator = null;
+  const getDocumentLocation = () => {
+    const document = message?.media?.document;
+    if (!document) throw new Error("Telegram document is missing");
+    return new Api.InputDocumentFileLocation({
+      id: document.id,
+      accessHash: document.accessHash,
+      fileReference: document.fileReference,
+    });
   };
 
   return new ReadableStream({
@@ -615,62 +621,81 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
       try {
         if (streamAbort.signal.aborted) {
           cleanup();
-          await finishGenerator();
           await closeClient();
           controller.close();
           return;
         }
 
-        if (!generator) {
-          // teleproto's iterDownload "limit" is not a byte count. Passing the
-          // requested byte length here can switch iterator implementations and
-          // break non-zero range requests. We bound the response ourselves by
-          // truncating/enforcing "remaining" below.
-          generator = client.iterDownload(message, {
-            offset: startOffset,
-            requestSize: MEDIA_CHUNK_SIZE,
-            signal: streamAbort.signal,
-          });
-        }
-
-        const next = await generator.next();
-
-        if (next.done) {
+        if (remaining != null && remaining <= 0) {
           cleanup();
           await closeClient();
           controller.close();
           return;
         }
 
-        const chunk = Buffer.from(next.value || "");
-        if (!chunk.length) {
+        const requestSize = remaining == null
+          ? MEDIA_CHUNK_SIZE
+          : Math.min(MEDIA_CHUNK_SIZE, remaining);
+
+        if (!Number.isInteger(requestSize) || requestSize <= 0) {
           cleanup();
-          await finishGenerator();
           await closeClient();
           controller.close();
           return;
         }
+
+        // Use teleproto's MediaScheduler path rather than iterDownload().
+        // MediaScheduler.getFile() uses upload.getFile(precise:false), applies
+        // the library's retry/migration handling, and returns one bounded chunk.
+        const chunk = await client._media.getFile(
+          routeDc,
+          getDocumentLocation(),
+          offset,
+          requestSize,
+          streamAbort.signal,
+          (newDc) => { routeDc = newDc; }
+        );
+
+        const data = Buffer.from(chunk || "");
+        if (!data.length) {
+          cleanup();
+          await closeClient();
+          controller.close();
+          return;
+        }
+
+        const take = remaining == null
+          ? data.length
+          : Math.min(data.length, remaining);
+
+        if (take <= 0) {
+          cleanup();
+          await closeClient();
+          controller.close();
+          return;
+        }
+
+        controller.enqueue(data.subarray(0, take));
+        offset += take;
 
         if (remaining != null) {
-          const take = Math.min(chunk.length, remaining);
-          if (take > 0) {
-            controller.enqueue(chunk.subarray(0, take));
-            remaining -= take;
-          }
-
+          remaining -= take;
           if (remaining <= 0) {
-            await finishGenerator();
             cleanup();
             await closeClient();
             controller.close();
+            return;
           }
-          return;
         }
 
-        controller.enqueue(chunk);
+        // Telegram EOF for a full-file request.
+        if (data.length < requestSize) {
+          cleanup();
+          await closeClient();
+          controller.close();
+        }
       } catch (error) {
         cleanup();
-        await finishGenerator();
         await closeClient();
 
         if (streamAbort.signal.aborted || error?.name === "AbortError") {
@@ -688,7 +713,6 @@ function createTelegramMediaStream(client, message, startOffset, byteLength, req
 
     async cancel() {
       streamAbort.abort();
-      await finishGenerator();
       await closeClient();
       cleanup();
     },
