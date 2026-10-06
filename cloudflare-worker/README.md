@@ -17,7 +17,7 @@ The existing website routes remain compatible:
 - `GET /telegram/status`
 - `GET /health`
 
-The Worker deliberately serves media in bounded HTTP Range chunks (512 KiB maximum per request). This avoids buffering an entire episode in memory and lets browser media elements continue with normal byte-range requests.
+The Worker deliberately serves media in bounded HTTP Range chunks (1 MiB maximum per request). This avoids buffering an entire episode in memory and lets browser media elements continue with normal byte-range requests.
 
 Public media chunks are cached at Cloudflare's edge cache. Protected media with signed tickets is never cached.
 
