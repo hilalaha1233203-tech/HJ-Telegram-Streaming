@@ -147,26 +147,23 @@ function getCachedMetadata(key) {
   return hit.message;
 }
 
-async function getTelegramMessage(env, messageId) {
+async function getTelegramMessage(messageId, client) {
   const key = String(messageId);
   const cached = getCachedMetadata(key);
   if (cached) return cached;
 
-  const client = await getTelegramClient(env);
-  return withTelegramSlot(async () => {
-    const [message] = await client.getMessages(client.__hjChannelId, {
-      ids: [messageId],
-    });
-
-    if (!message || !message.media?.document) {
-      throw Object.assign(new Error("Telegram message does not contain a document"), {
-        code: "MEDIA_NOT_FOUND",
-      });
-    }
-
-    cacheMetadata(key, message);
-    return message;
+  const [message] = await client.getMessages(client.__hjChannelId, {
+    ids: [messageId],
   });
+
+  if (!message || !message.media?.document) {
+    throw Object.assign(new Error("Telegram message does not contain a document"), {
+      code: "MEDIA_NOT_FOUND",
+    });
+  }
+
+  cacheMetadata(key, message);
+  return message;
 }
 
 function buildMediaHeaders(meta, kind, range, isProtected, origin, env) {
@@ -604,7 +601,13 @@ function mediaError(status, code, origin, env, detail = "") {
   return jsonResponse(errorPayload(code, detail), status, origin, env);
 }
 
-function createTelegramMediaStream(env, message, startOffset, byteLength, requestSignal) {
+function createTelegramMediaStream(client, message, startOffset, byteLength, requestSignal) {
+  let clientClosed = false;
+  const closeClient = async () => {
+    if (clientClosed) return;
+    clientClosed = true;
+    try { await client.disconnect(); } catch {}
+  };
   const streamAbort = new AbortController();
   let generator = null;
   let remaining = byteLength == null ? null : Number(byteLength);
@@ -636,6 +639,7 @@ function createTelegramMediaStream(env, message, startOffset, byteLength, reques
       try {
         if (streamAbort.signal.aborted) {
           cleanup();
+          await closeClient();
           controller.close();
           return;
         }
@@ -673,6 +677,7 @@ function createTelegramMediaStream(env, message, startOffset, byteLength, reques
           if (remaining <= 0) {
             await finishGenerator();
             cleanup();
+            await closeClient();
             controller.close();
           }
           return;
@@ -682,12 +687,17 @@ function createTelegramMediaStream(env, message, startOffset, byteLength, reques
       } catch (error) {
         cleanup();
         await finishGenerator();
+        await closeClient();
 
         if (streamAbort.signal.aborted || error?.name === "AbortError") {
           controller.close();
           return;
         }
 
+        console.error("HJ Telegram media stream error", {
+          messageId: message?.id,
+          error: String(error?.message || error).slice(0, 200),
+        });
         controller.error(error);
       }
     },
@@ -695,6 +705,7 @@ function createTelegramMediaStream(env, message, startOffset, byteLength, reques
     async cancel() {
       streamAbort.abort();
       await finishGenerator();
+      await closeClient();
       cleanup();
     },
   });
@@ -727,9 +738,11 @@ async function handleMedia(request, env, ctx, kind, messageId) {
     );
   }
 
-  let message;
+  let client = null;
+  let handedOffToStream = false;
   try {
-    message = await getTelegramMessage(env, Number(messageId));
+    client = await createTelegramClient(env);
+    message = await getTelegramMessage(Number(messageId), client);
   } catch (error) {
     const code = error?.code === "MEDIA_NOT_FOUND"
       ? "MEDIA_NOT_FOUND"
@@ -792,6 +805,8 @@ async function handleMedia(request, env, ctx, kind, messageId) {
 
   if (request.method === "HEAD") {
     headers.set("Content-Length", String(range.length));
+    await client.disconnect().catch(() => {});
+    client = null;
     return new Response(null, {
       status: range.partial ? 206 : 200,
       headers,
@@ -814,12 +829,13 @@ async function handleMedia(request, env, ctx, kind, messageId) {
 
   try {
     const body = createTelegramMediaStream(
-      env,
+      client,
       message,
       range.start,
       range.requested ? range.length : null,
       request.signal
     );
+    handedOffToStream = true;
 
     const response = new Response(body, {
       status: range.requested ? 206 : 200,
@@ -839,6 +855,7 @@ async function handleMedia(request, env, ctx, kind, messageId) {
 
     return response;
   } catch (error) {
+    if (client && !handedOffToStream) await client.disconnect().catch(() => {});
     if (error?.name === "AbortError") {
       return new Response(null, { status: 499, headers });
     }
