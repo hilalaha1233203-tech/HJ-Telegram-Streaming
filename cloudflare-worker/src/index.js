@@ -1072,7 +1072,12 @@ async function handleTelegramStatus(request, env) {
       } finally {
         await client.disconnect().catch(() => {});
       }
-    } catch {
+    } catch (error) {
+      console.error("HJ Telegram status ping failed", {
+        name: String(error?.name || "").slice(0, 80),
+        code: String(error?.code || "").slice(0, 80),
+        message: String(error?.message || error).replace(/[\\r\\n]+/g, " ").slice(0, 240),
+      });
       return jsonResponse(
         { ok: false, telegramConfigured: true, telegramReachable: false },
         503,
