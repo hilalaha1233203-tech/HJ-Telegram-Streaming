@@ -17,7 +17,7 @@ The existing website routes remain compatible:
 - `GET /telegram/status`
 - `GET /health`
 
-The Worker deliberately serves media in bounded HTTP Range chunks (1 MiB maximum per request). This avoids buffering an entire episode in memory and lets browser media elements continue with normal byte-range requests.
+The Worker serves media directly from Telegram. Range requests are bounded to 1 MiB per request, while a request without Range returns a normal full-file 200 stream. The Worker does not use the Workers Cache API for media because Cloudflare does not allow storing 206 Partial Content responses there.
 
 Public media chunks are cached at Cloudflare's edge cache. Protected media with signed tickets is never cached.
 
@@ -75,5 +75,6 @@ Set the website's existing `VITE_STREAMING_SERVER_URL` to the Worker URL. No Epi
 - Telegram credentials are Worker secrets.
 - Protected media still uses the HJ entitlement authority through `/api/shortener/access`.
 - Signed media tickets are bound to user-agent and expire after 5 minutes.
-- Free public chunks use wildcard CORS because they contain no browser credentials.
+- Free public media uses wildcard CORS because it contains no browser credentials.
+- Media responses are not stored in the Worker Cache API; Telegram remains the source of truth.
 - The Worker never returns the Telegram session in an error response.
