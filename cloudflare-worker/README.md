@@ -13,6 +13,7 @@ The Worker no longer uses the heavy MTProto teleproto client for website media d
 Set these in Cloudflare; never commit them:
 
 - TELEGRAM_BOT_TOKEN
+- STORAGE_CHAT_ID (recommended when multiple storage channels exist)
 - SUPABASE_URL
 - SUPABASE_PUBLISHABLE_KEY
 - SUPABASE_SERVICE_ROLE_KEY
