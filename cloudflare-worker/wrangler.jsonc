@@ -8,5 +8,11 @@
   "durable_objects": {
     "bindings": [{ "name": "MEDIA_LISTENER", "class_name": "MediaListener" }]
   },
-  "r2_buckets": [{ "binding": "MEDIA_CACHE", "bucket_name": "hj-groups-media" }]
+  "r2_buckets": [{ "binding": "MEDIA_CACHE", "bucket_name": "hj-groups-media" }],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MediaListener"]
+    }
+  ]
 }
