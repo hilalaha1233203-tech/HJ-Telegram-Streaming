@@ -11,8 +11,7 @@ const PORT = process.env.PORT || 3000;
 const FILE_NAME = "TEST.m4a";
 
 const DEFAULT_ALLOWED_ORIGINS = [
-    "https://hj-groups-web.vercel.app",
-    "https://hj-groups-website.getvoroa.com",
+    "https://hj-groups-web.pages.dev",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ];
