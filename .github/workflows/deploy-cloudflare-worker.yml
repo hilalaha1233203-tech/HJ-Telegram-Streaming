@@ -29,8 +29,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: cloudflare-worker/package.json
 
       - name: Install
         run: npm install --no-package-lock
