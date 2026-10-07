@@ -48,7 +48,7 @@ jobs:
         run: |
           node <<'NODE'
           const url = 'https://hj-telegram-streaming.hilalaha1233203.workers.dev/telegram/messages'
-          const origin = 'https://hj-groups-website.getvoroa.com'
+          const origin = 'https://hj-groups-web.pages.dev'
           const response = await fetch(url, {
             method: 'OPTIONS',
             headers: {
