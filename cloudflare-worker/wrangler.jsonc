@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hj-telegram-streaming",
+  "main": "./src/index.js",
+  "compatibility_date": "2026-10-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "MEDIA_LISTENER", "class_name": "MediaListener" }]
+  },
+  "r2_buckets": [{ "binding": "MEDIA_CACHE", "bucket_name": "hj-groups-media" }]
+}
