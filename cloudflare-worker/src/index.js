@@ -12,8 +12,7 @@ import {
 } from "./pure.js";
 
 const DEFAULT_ALLOWED_ORIGINS = [
-  "https://hj-groups-web.vercel.app",
-  "https://hj-groups-website.getvoroa.com",
+  "https://hj-groups-web.pages.dev",
   "http://localhost:5173",
   "http://127.0.0.1:5173",
 ];
@@ -355,11 +354,12 @@ async function botApiGetFile(env, fileId) {
   return payload.result;
 }
 
-async function telegramFileResponse(env, filePath, request) {
+async function telegramFileResponse(env, filePath, request, range) {
   const token = envString(env, "TELEGRAM_BOT_TOKEN");
   const headers = new Headers();
-  const range = request.headers.get("range");
-  if (range) headers.set("Range", range);
+  if (range?.requested) {
+    headers.set("Range", "bytes=" + range.start + "-" + range.end);
+  }
   const response = await fetch(
     "https://api.telegram.org/file/bot" + token + "/" + filePath,
     { headers, redirect: "follow" }
@@ -499,11 +499,11 @@ async function handleMedia(request, env, kind, messageId) {
       );
     }
 
-    let upstream = await telegramFileResponse(env, fileInfo.file_path, request);
+    let upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
     if (!upstream.ok) {
       try {
         fileInfo = await botApiGetFile(env, indexed.file_id);
-        upstream = await telegramFileResponse(env, fileInfo.file_path, request);
+        upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
       } catch {}
     }
 
