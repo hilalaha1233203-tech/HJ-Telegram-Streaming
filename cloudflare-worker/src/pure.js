@@ -1,14 +1,15 @@
-export const MEDIA_CHUNK_SIZE = 1024 * 1024;
 export const MEDIA_TICKET_TTL_MS = 5 * 60 * 1000;
-export const MEDIA_METADATA_TTL_MS = 5 * 60 * 1000;
-export const MAX_METADATA_CACHE = 128;
+export const MEDIA_CACHE_PREFIX = "streaming-cache/";
+export const TELEGRAM_BOT_GETFILE_LIMIT_BYTES = 20 * 1024 * 1024;
+export const TELEGRAM_CHUNK_LIMIT_BYTES = 19 * 1024 * 1024;
+export const MAX_CHUNKS_PER_REQUEST = 20;
 
 export function parseMessageId(raw) {
   const value = Number(String(raw ?? "").trim());
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
-export function parseSingleRange(header, size, maxBytes = MEDIA_CHUNK_SIZE) {
+export function parseSingleRange(header, size) {
   const fileSize = Number(size);
   if (!Number.isSafeInteger(fileSize) || fileSize <= 0) {
     return { error: "invalid-size" };
@@ -35,24 +36,20 @@ export function parseSingleRange(header, size, maxBytes = MEDIA_CHUNK_SIZE) {
   }
 
   const match = spec.match(/^(\d*)-(\d*)$/);
-  if (!match) {
-    return { error: "invalid-range" };
-  }
+  if (!match) return { error: "invalid-range" };
 
   const [, left, right] = match;
+  if (!left && !right) return { error: "invalid-range" };
+
   let start;
   let end;
-
-  if (!left && !right) {
-    return { error: "invalid-range" };
-  }
 
   if (!left) {
     const suffixLength = Number(right);
     if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
       return { error: "unsatisfiable" };
     }
-    const length = Math.min(suffixLength, fileSize, maxBytes);
+    const length = Math.min(suffixLength, fileSize);
     start = fileSize - length;
     end = fileSize - 1;
   } else {
@@ -64,14 +61,13 @@ export function parseSingleRange(header, size, maxBytes = MEDIA_CHUNK_SIZE) {
     if (!Number.isSafeInteger(end) || end < start) {
       return { error: "unsatisfiable" };
     }
-    end = Math.min(end, fileSize - 1, start + maxBytes - 1);
+    end = Math.min(end, fileSize - 1);
   }
 
-  const length = end - start + 1;
   return {
     start,
     end,
-    length,
+    length: end - start + 1,
     partial: true,
     requested: true,
   };
@@ -151,7 +147,40 @@ export function encodeDispositionFilename(name) {
   );
 }
 
-export function errorPayload(code, error = "") {
+export function errorPayload(code, error = "", hint = "") {
   const normalized = String(error || "").replace(/[\r\n]+/g, " ").slice(0, 180);
-  return normalized ? { error: code, detail: normalized } : { error: code };
+  const payload = { error: code };
+  if (normalized) payload.detail = normalized;
+  if (hint) payload.hint = String(hint).slice(0, 80);
+  return payload;
+}
+
+export function safeKeyPart(value, fallback = "unknown") {
+  const raw = String(value ?? "").trim();
+  if (!raw) return fallback;
+  return encodeURIComponent(raw).replace(/%/g, "_").slice(0, 180) || fallback;
+}
+
+export function chunkRangePlan(chunks, start, end) {
+  const plan = [];
+  let offset = 0;
+  for (const chunk of chunks) {
+    const chunkStart = offset;
+    const chunkEnd = offset + Number(chunk.size) - 1;
+    if (chunkEnd >= start && chunkStart <= end) {
+      const localStart = Math.max(0, start - chunkStart);
+      const localEnd = Math.min(Number(chunk.size) - 1, end - chunkStart);
+      plan.push({
+        chunk,
+        chunkStart,
+        chunkEnd,
+        localStart,
+        localEnd,
+        length: localEnd - localStart + 1,
+      });
+    }
+    offset += Number(chunk.size);
+    if (chunkStart > end) break;
+  }
+  return plan;
 }
