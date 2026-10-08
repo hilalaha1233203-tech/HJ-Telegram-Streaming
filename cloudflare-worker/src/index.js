@@ -423,7 +423,21 @@ async function handleMedia(request, env, kind, messageId, ctx) {
     const indexed = await getIndexedMedia(env, kind, Number(messageId));
     if (!indexed) return mediaError(404, "MEDIA_INDEX_NOT_FOUND", origin, env);
 
-    const size = Number(indexed.file_size);
+    const partCount = Number(indexed.part_count || 1);
+    if (!Number.isSafeInteger(partCount) || partCount < 1) {
+      return mediaError(500, "MEDIA_MAPPING_INVALID", origin, env);
+    }
+    if (partCount > 1) {
+      return mediaError(
+        501,
+        "SPLIT_MEDIA_REASSEMBLY_NOT_IMPLEMENTED",
+        origin,
+        env,
+        "This verified multi-part mapping requires the reassembly phase before website playback."
+      );
+    }
+
+    const size = Number(indexed.assembled_file_size || indexed.file_size);
     if (!Number.isSafeInteger(size) || size <= 0) {
       return mediaError(404, "MEDIA_INDEX_SIZE_MISSING", origin, env);
     }
