@@ -281,7 +281,7 @@ async function fakeFetch(input, options = {}) {
       });
     }
 
-    if (path.includes("/file/bot-test-bot-token/")) {
+    if (path.includes("/file/bottest-bot-token/")) {
       state.calls.file += 1;
       const marker = "/file/bottest-bot-token/";
       const filePath = path.slice(
