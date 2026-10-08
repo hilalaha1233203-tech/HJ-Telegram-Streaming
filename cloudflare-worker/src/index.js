@@ -455,131 +455,253 @@ function mediaError(status, code, origin, env, detail = "") {
   return jsonResponse(errorPayload(code, detail), status, origin, env);
 }
 
-const MEDIA_MAX_DURATION_MS=24*60*60*1000; const MEDIA_CACHE_GRACE_MS=15*60*1000; const MEDIA_LISTENER_LEASE_MS=45*1000;
-export class MediaListener extends DurableObject { constructor(ctx,env){super(ctx,env);ctx.blockConcurrencyWhile(async()=>{ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS listeners (session_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,last_seen INTEGER NOT NULL,lease_until INTEGER NOT NULL,ended_at INTEGER)");ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS media_state (cache_key TEXT PRIMARY KEY,base_expiry INTEGER NOT NULL,last_listener_end INTEGER NOT NULL DEFAULT 0)");});} async prime(cacheKey,durationMs,uploadedAt=Date.now()){const now=Date.now(),d=Math.min(MEDIA_MAX_DURATION_MS,Math.max(0,Number(durationMs)||0)),u=Number.isFinite(Number(uploadedAt))?Number(uploadedAt):now,base=u+d+MEDIA_CACHE_GRACE_MS;this.ctx.storage.sql.exec("INSERT INTO media_state (cache_key,base_expiry,last_listener_end) VALUES (?,?,0) ON CONFLICT(cache_key) DO UPDATE SET base_expiry=MAX(base_expiry,excluded.base_expiry)",String(cacheKey),base);await this.schedule();return {ok:true,baseExpiry:base};} async start(userId,durationMs,cacheKey,uploadedAt=Date.now()){const now=Date.now(),d=Math.min(MEDIA_MAX_DURATION_MS,Math.max(0,Number(durationMs)||0)),u=Number.isFinite(Number(uploadedAt))?Number(uploadedAt):now,base=u+d+MEDIA_CACHE_GRACE_MS;this.ctx.storage.sql.exec("INSERT INTO media_state (cache_key,base_expiry,last_listener_end) VALUES (?,?,0) ON CONFLICT(cache_key) DO UPDATE SET base_expiry=MAX(base_expiry,excluded.base_expiry)",String(cacheKey),base);const sessionId=crypto.randomUUID();this.ctx.storage.sql.exec("INSERT INTO listeners (session_id,user_id,last_seen,lease_until,ended_at) VALUES (?,?,?,?,NULL)",sessionId,String(userId),now,now+MEDIA_LISTENER_LEASE_MS);await this.schedule();return {sessionId,baseExpiry:base};} async heartbeat(sessionId){const now=Date.now(),r=this.ctx.storage.sql.exec("UPDATE listeners SET last_seen=?,lease_until=?,ended_at=NULL WHERE session_id=? AND ended_at IS NULL",now,now+MEDIA_LISTENER_LEASE_MS,String(sessionId));if(r.rowsWritten>0)await this.schedule();return {ok:r.rowsWritten>0};} async end(sessionId){const now=Date.now(),r=this.ctx.storage.sql.exec("UPDATE listeners SET ended_at=?,lease_until=? WHERE session_id=? AND ended_at IS NULL",now,now,String(sessionId));if(r.rowsWritten>0){this.ctx.storage.sql.exec("UPDATE media_state SET last_listener_end=MAX(last_listener_end,?)",now);await this.schedule();}return {ok:r.rowsWritten>0};} async alarm(){const now=Date.now();this.expireLeases(now);const s=this.ctx.storage.sql.exec("SELECT cache_key,base_expiry,last_listener_end FROM media_state LIMIT 1").one();if(!s?.cache_key){await this.ctx.storage.deleteAlarm();return;}const active=Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS active FROM listeners WHERE ended_at IS NULL AND lease_until>?",now).one()?.active||0);if(active>0){await this.schedule();return;}const deleteAt=Math.max(Number(s.base_expiry||0),Number(s.last_listener_end||0)+MEDIA_CACHE_GRACE_MS);if(now>=deleteAt){if(this.env.MEDIA_CACHE)await this.env.MEDIA_CACHE.delete(String(s.cache_key));this.ctx.storage.sql.exec("DELETE FROM listeners");this.ctx.storage.sql.exec("DELETE FROM media_state");await this.ctx.storage.deleteAlarm();return;}await this.ctx.storage.setAlarm(deleteAt);} expireLeases(now){const r=this.ctx.storage.sql.exec("UPDATE listeners SET ended_at=last_seen WHERE ended_at IS NULL AND lease_until<=?",now);if(r.rowsWritten>0){const row=this.ctx.storage.sql.exec("SELECT MAX(ended_at) AS last_end FROM listeners WHERE ended_at IS NOT NULL").one();if(Number(row?.last_end||0)>0)this.ctx.storage.sql.exec("UPDATE media_state SET last_listener_end=MAX(last_listener_end,?)",Number(row.last_end));}} async schedule(){const now=Date.now(),s=this.ctx.storage.sql.exec("SELECT base_expiry,last_listener_end FROM media_state LIMIT 1").one(),nl=Number(this.ctx.storage.sql.exec("SELECT MIN(lease_until) AS next_lease FROM listeners WHERE ended_at IS NULL").one()?.next_lease||0),da=Math.max(Number(s?.base_expiry||0),Number(s?.last_listener_end||0)+MEDIA_CACHE_GRACE_MS),next=nl>now?Math.min(nl,da||nl):da;await this.ctx.storage.setAlarm(next>now?next:now+1000);}}
+const MEDIA_MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+const MEDIA_CACHE_GRACE_MS = 10 * 60 * 1000;
+const MEDIA_LISTENER_LEASE_MS = 45 * 1000;
+const MEDIA_FILL_LEASE_MS = 2 * 60 * 1000;
+
+export class MediaListener extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    ctx.blockConcurrencyWhile(async () => {
+      ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS listeners (session_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,last_seen INTEGER NOT NULL,lease_until INTEGER NOT NULL,ended_at INTEGER)");
+      ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS media_state (cache_key TEXT PRIMARY KEY,base_expiry INTEGER NOT NULL,last_listener_end INTEGER NOT NULL DEFAULT 0)");
+      ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fill_locks (cache_key TEXT PRIMARY KEY,lease_until INTEGER NOT NULL)");
+    });
+  }
+  async prime(cacheKey, durationMs, uploadedAt = Date.now()) {
+    const d = Math.min(MEDIA_MAX_DURATION_MS, Math.max(0, Number(durationMs) || 0));
+    const u = Number.isFinite(Number(uploadedAt)) ? Number(uploadedAt) : Date.now();
+    const base = u + d + MEDIA_CACHE_GRACE_MS;
+    this.ctx.storage.sql.exec("INSERT INTO media_state (cache_key,base_expiry,last_listener_end) VALUES (?,?,0) ON CONFLICT(cache_key) DO UPDATE SET base_expiry=MAX(base_expiry,excluded.base_expiry)", String(cacheKey), base);
+    await this.schedule();
+    return { ok: true, baseExpiry: base };
+  }
+  async acquireFill(cacheKey, leaseMs = MEDIA_FILL_LEASE_MS) {
+    const now = Date.now();
+    const leaseUntil = now + Math.max(10000, Number(leaseMs) || MEDIA_FILL_LEASE_MS);
+    const key = String(cacheKey);
+    const current = this.ctx.storage.sql.exec("SELECT lease_until FROM fill_locks WHERE cache_key=?", key).one();
+    if (Number(current?.lease_until || 0) > now) return { acquired: false, leaseUntil: Number(current.lease_until) };
+    this.ctx.storage.sql.exec("INSERT INTO fill_locks (cache_key,lease_until) VALUES (?,?) ON CONFLICT(cache_key) DO UPDATE SET lease_until=excluded.lease_until", key, leaseUntil);
+    await this.schedule();
+    return { acquired: true, leaseUntil };
+  }
+  async releaseFill(cacheKey) {
+    this.ctx.storage.sql.exec("DELETE FROM fill_locks WHERE cache_key=?", String(cacheKey));
+    await this.schedule();
+    return { ok: true };
+  }
+  async start(userId, durationMs, cacheKey, uploadedAt = Date.now()) {
+    const now = Date.now();
+    const d = Math.min(MEDIA_MAX_DURATION_MS, Math.max(0, Number(durationMs) || 0));
+    const u = Number.isFinite(Number(uploadedAt)) ? Number(uploadedAt) : now;
+    const base = u + d + MEDIA_CACHE_GRACE_MS;
+    this.ctx.storage.sql.exec("INSERT INTO media_state (cache_key,base_expiry,last_listener_end) VALUES (?,?,0) ON CONFLICT(cache_key) DO UPDATE SET base_expiry=MAX(base_expiry,excluded.base_expiry)", String(cacheKey), base);
+    const sessionId = crypto.randomUUID();
+    this.ctx.storage.sql.exec("INSERT INTO listeners (session_id,user_id,last_seen,lease_until,ended_at) VALUES (?,?,?,?,NULL)", sessionId, String(userId), now, now + MEDIA_LISTENER_LEASE_MS);
+    await this.schedule();
+    return { sessionId, baseExpiry: base };
+  }
+  async heartbeat(sessionId) {
+    const now = Date.now();
+    const r = this.ctx.storage.sql.exec("UPDATE listeners SET last_seen=?,lease_until=?,ended_at=NULL WHERE session_id=? AND ended_at IS NULL", now, now + MEDIA_LISTENER_LEASE_MS, String(sessionId));
+    if (r.rowsWritten > 0) await this.schedule();
+    return { ok: r.rowsWritten > 0 };
+  }
+  async end(sessionId) {
+    const now = Date.now();
+    const r = this.ctx.storage.sql.exec("UPDATE listeners SET ended_at=?,lease_until=? WHERE session_id=? AND ended_at IS NULL", now, now, String(sessionId));
+    if (r.rowsWritten > 0) {
+      this.ctx.storage.sql.exec("UPDATE media_state SET last_listener_end=MAX(last_listener_end,?)", now);
+      await this.schedule();
+    }
+    return { ok: r.rowsWritten > 0 };
+  }
+  async alarm() {
+    const now = Date.now();
+    this.expireLeases(now);
+    this.ctx.storage.sql.exec("DELETE FROM fill_locks WHERE lease_until<=?", now);
+    const state = this.ctx.storage.sql.exec("SELECT cache_key,base_expiry,last_listener_end FROM media_state LIMIT 1").one();
+    if (!state?.cache_key) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    const active = Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS active FROM listeners WHERE ended_at IS NULL AND lease_until>?", now).one()?.active || 0);
+    if (active > 0) {
+      await this.schedule();
+      return;
+    }
+    const deleteAt = Math.max(Number(state.base_expiry || 0), Number(state.last_listener_end || 0) + MEDIA_CACHE_GRACE_MS);
+    if (now >= deleteAt) {
+      if (this.env.MEDIA_CACHE) await this.env.MEDIA_CACHE.delete(String(state.cache_key));
+      this.ctx.storage.sql.exec("DELETE FROM listeners");
+      this.ctx.storage.sql.exec("DELETE FROM media_state");
+      this.ctx.storage.sql.exec("DELETE FROM fill_locks WHERE cache_key=?", String(state.cache_key));
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.schedule();
+  }
+  expireLeases(now) {
+    const r = this.ctx.storage.sql.exec("UPDATE listeners SET ended_at=last_seen WHERE ended_at IS NULL AND lease_until<=?", now);
+    if (r.rowsWritten > 0) {
+      const row = this.ctx.storage.sql.exec("SELECT MAX(ended_at) AS last_end FROM listeners WHERE ended_at IS NOT NULL").one();
+      if (Number(row?.last_end || 0) > 0) this.ctx.storage.sql.exec("UPDATE media_state SET last_listener_end=MAX(last_listener_end,?)", Number(row.last_end));
+    }
+  }
+  async schedule() {
+    const now = Date.now();
+    const state = this.ctx.storage.sql.exec("SELECT base_expiry,last_listener_end FROM media_state LIMIT 1").one();
+    const nextLease = Number(this.ctx.storage.sql.exec("SELECT MIN(lease_until) AS next_lease FROM listeners WHERE ended_at IS NULL").one()?.next_lease || 0);
+    const fillLease = Number(this.ctx.storage.sql.exec("SELECT MIN(lease_until) AS fill_lease FROM fill_locks").one()?.fill_lease || 0);
+    const deleteAt = Math.max(Number(state?.base_expiry || 0), Number(state?.last_listener_end || 0) + MEDIA_CACHE_GRACE_MS);
+    const candidates = [deleteAt, nextLease, fillLease].filter((value) => value > now);
+    await this.ctx.storage.setAlarm(candidates.length ? Math.min(...candidates) : now + 1000);
+  }
+}
 
 function mediaCacheKey(kind,indexed){return "media/"+String(kind)+"/"+String(indexed.telegram_message_id)+"/"+encodeURIComponent(String(indexed.file_id||"file"))+"-"+String(indexed.file_size||0);}
 function mediaListenerStub(env,kind,messageId){return env.MEDIA_LISTENER.getByName(String(kind)+":"+String(messageId));}
 async function listenerUser(request,env,kind,messageId){const t=String(new URL(request.url).searchParams.get("ticket")||"").trim(),tu=verifyMediaTicket(env,t,kind,messageId,request.headers.get("user-agent")||"");if(tu?.userId)return String(tu.userId);const a=String(request.headers.get("authorization")||"").trim(),u=await getSupabaseUser(env,a);if(u?.id)return String(u.id);const anon=String(new URL(request.url).searchParams.get("listenerId")||"").trim();return anon?("anon:"+anon):null;}
 async function handleListener(request,env,action){const origin=request.headers.get("origin")||"",url=new URL(request.url),kind=String(url.searchParams.get("kind")||"").toLowerCase(),messageId=parseMessageId(url.searchParams.get("messageId"));if(!["audio","video","document"].includes(kind)||!messageId)return mediaError(400,"INVALID_LISTENER_REQUEST",origin,env);const access=await inspectMediaAccess(env,request,kind,messageId);if(!access.ok)return mediaError(access.status||403,"MEDIA_ACCESS_DENIED",origin,env,access.error);const indexed=await getIndexedMedia(env,kind,messageId);if(!indexed)return mediaError(404,"MEDIA_INDEX_NOT_FOUND",origin,env);const userId=await listenerUser(request,env,kind,messageId);if(!userId)return mediaError(401,"LISTENER_AUTH_REQUIRED",origin,env);const stub=mediaListenerStub(env,kind,messageId),cacheKey=mediaCacheKey(kind,indexed);let result;if(action==="start"){const requestedDurationMs=Number(url.searchParams.get("durationMs")||0);const indexedDurationMs=Math.max(0,Number(indexed.duration||0)*1000);const effectiveDurationMs=Math.min(MEDIA_MAX_DURATION_MS,Math.max(0,Number.isFinite(requestedDurationMs)&&requestedDurationMs>0?requestedDurationMs:indexedDurationMs));let uploadedAt=Date.now();if(env.MEDIA_CACHE){try{const head=await env.MEDIA_CACHE.head(cacheKey);if(head?.uploaded)uploadedAt=head.uploaded.getTime();}catch{}}result=await stub.start(userId,effectiveDurationMs,cacheKey,uploadedAt);}else{const sid=String(url.searchParams.get("sessionId")||"").trim();if(!sid)return mediaError(400,"LISTENER_SESSION_REQUIRED",origin,env);result=action==="heartbeat"?await stub.heartbeat(sid):await stub.end(sid);}return jsonResponse(result,200,origin,env);}
 async function handleMedia(request, env, kind, messageId, ctx) {
-  if (!parseMessageId(messageId)) {
-    return mediaError(400, "INVALID_MESSAGE_ID", request.headers.get("origin") || "", env);
-  }
-
+  if (!parseMessageId(messageId)) return mediaError(400, "INVALID_MESSAGE_ID", request.headers.get("origin") || "", env);
   const access = await inspectMediaAccess(env, request, kind, Number(messageId));
-  if (!access.ok) {
-    return mediaError(
-      access.status || 403,
-      "MEDIA_ACCESS_DENIED",
-      request.headers.get("origin") || "",
-      env,
-      access.error
-    );
-  }
+  if (!access.ok) return mediaError(access.status || 403, "MEDIA_ACCESS_DENIED", request.headers.get("origin") || "", env, access.error);
 
   const isPreview = Boolean(access.viaPreview);
   const isProtected = Boolean(access.viaTicket || isProtectedPolicy(access.row || {}));
-  if (isProtected && !access.viaTicket && !isPreview) {
-    return mediaError(403, "SECURE_TICKET_REQUIRED", request.headers.get("origin") || "", env);
-  }
+  if (isProtected && !access.viaTicket && !isPreview) return mediaError(403, "SECURE_TICKET_REQUIRED", request.headers.get("origin") || "", env);
 
   const origin = request.headers.get("origin") || "";
   try {
     const indexed = await getIndexedMedia(env, kind, Number(messageId));
     if (!indexed) return mediaError(404, "MEDIA_INDEX_NOT_FOUND", origin, env);
-
     const size = Number(indexed.file_size);
-    if (!Number.isSafeInteger(size) || size <= 0) {
-      return mediaError(404, "MEDIA_INDEX_SIZE_MISSING", origin, env);
-    }
+    if (!Number.isSafeInteger(size) || size <= 0) return mediaError(404, "MEDIA_INDEX_SIZE_MISSING", origin, env);
+    if (size > 20 * 1024 * 1024) return mediaError(413, "MEDIA_TOO_LARGE_FOR_BOT_API_STREAM", origin, env, "Compress this Telegram media below 20 MB before website streaming.");
 
-    if (size > 20 * 1024 * 1024) {
-      return mediaError(
-        413,
-        "MEDIA_TOO_LARGE_FOR_BOT_API_STREAM",
-        origin,
-        env,
-        "Compress this Telegram media below 20 MB before website streaming."
-      );
-    }
-
-    const range = parseSingleRange(
-      request.headers.get("range"),
-      size,
-      1024 * 1024
-    );
+    const range = parseSingleRange(request.headers.get("range"), size, 1024 * 1024);
     if (range.error) {
-      const headers = new Headers({
-        "Content-Range": "bytes */" + size,
-        "Accept-Ranges": "bytes",
-      });
-      applyCors(headers, origin, env);
-      return new Response(null, { status: 416, headers });
+      const h = new Headers({"Content-Range":"bytes */"+size,"Accept-Ranges":"bytes"});
+      applyCors(h, origin, env);
+      return new Response(null,{status:416,headers:h});
     }
 
     const headers = mediaHeaders(indexed, kind, range, origin, env);
-    if (request.method === "HEAD") {
-      return new Response(null, {
-        status: range.requested ? 206 : 200,
-        headers,
-      });
+    if (request.method === "HEAD") return new Response(null,{status:range.requested?206:200,headers});
+
+    const cacheKey = mediaCacheKey(kind, indexed);
+    const listenerStub = mediaListenerStub(env, kind, messageId);
+
+    // R2 is the first media source. Telegram is not contacted on an R2 cache hit.
+    if (env.MEDIA_CACHE) {
+      try {
+        const cached = await env.MEDIA_CACHE.get(cacheKey, { range: request.headers });
+        if (cached?.body) {
+          const h = new Headers();
+          cached.writeHttpMetadata(h);
+          h.set("ETag", cached.httpEtag);
+          h.set("Accept-Ranges", "bytes");
+          h.set("X-HJ-Telegram-Source", "r2-cache");
+          applyCors(h, origin, env);
+          if (cached.range) {
+            const offset = Number(cached.range.offset || 0);
+            const length = Number(cached.range.length || cached.size);
+            h.set("Content-Range", "bytes " + offset + "-" + (offset + length - 1) + "/" + cached.size);
+            h.set("Content-Length", String(length));
+            return new Response(cached.body,{status:206,headers:h});
+          }
+          h.set("Content-Length", String(cached.size));
+          return new Response(cached.body,{status:200,headers:h});
+        }
+      } catch (error) {
+        console.warn("HJ R2 cache read failed", String(error?.message || error).slice(0,180));
+      }
     }
 
     let fileInfo;
     try {
       fileInfo = await botApiGetFile(env, indexed.file_id);
     } catch (firstError) {
-      return mediaError(
-        Number(firstError.statusCode) === 400 ? 404 : 502,
-        "TELEGRAM_FILE_LOOKUP_FAILED",
-        origin,
-        env,
-        firstError.message
-      );
+      return mediaError(Number(firstError.statusCode)===400?404:502,"TELEGRAM_FILE_LOOKUP_FAILED",origin,env,firstError.message);
     }
 
-    const cacheKey=mediaCacheKey(kind,indexed);
-    if(env.MEDIA_CACHE&&range.requested&&ctx){ctx.waitUntil((async()=>{try{if(await env.MEDIA_CACHE.head(cacheKey))return;const h=new Headers(request.headers);h.delete("range");const fullRequest=new Request(request,{headers:h});const full=await telegramFileResponse(env,fileInfo.file_path,fullRequest);if(full.ok&&full.status===200&&full.body){const uploadAt=Date.now();await env.MEDIA_CACHE.put(cacheKey,full.body,{httpMetadata:{contentType:indexed.mime_type||"application/octet-stream",contentDisposition:headers.get("Content-Disposition")||"inline",cacheControl:"private, no-store"},customMetadata:{duration_ms:String(Math.max(0,Number(indexed.duration||0)*1000)),uploaded_at:String(uploadAt),message_id:String(messageId),media_kind:String(kind)}});await mediaListenerStub(env,kind,messageId).prime(cacheKey,Math.max(0,Number(indexed.duration||0)*1000),uploadAt);}}catch(e){console.warn("HJ R2 range prefill failed",String(e?.message||e).slice(0,180));}})());}
-    if(env.MEDIA_CACHE){try{const cached=await env.MEDIA_CACHE.get(cacheKey,{range:request.headers});if(cached&&cached.body){const h=new Headers();cached.writeHttpMetadata(h);h.set("ETag",cached.httpEtag);h.set("Accept-Ranges","bytes");h.set("X-HJ-Telegram-Source","r2-cache");applyCors(h,origin,env);if(cached.range){const off=Number(cached.range.offset||0),len=Number(cached.range.length||cached.size);h.set("Content-Range","bytes "+off+"-"+(off+len-1)+"/"+cached.size);h.set("Content-Length",String(len));return new Response(cached.body,{status:206,headers:h});}h.set("Content-Length",String(cached.size));return new Response(cached.body,{status:200,headers:h});}}catch(e){console.warn("HJ R2 cache read failed",String(e?.message||e).slice(0,180));}}
-    let upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
-    if (!upstream.ok) {
-      try {
-        fileInfo = await botApiGetFile(env, indexed.file_id);
-        upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
-      } catch {}
+    // One per-media Durable Object prevents concurrent requests from filling the same R2 object.
+    if (env.MEDIA_CACHE && ctx) {
+      ctx.waitUntil((async()=>{
+        let acquired=false;
+        try {
+          const lock=await listenerStub.acquireFill(cacheKey);
+          acquired=Boolean(lock?.acquired);
+          if (!acquired || await env.MEDIA_CACHE.head(cacheKey)) return;
+
+          if (range.requested) {
+            const fullHeaders=new Headers(request.headers);
+            fullHeaders.delete("Range");
+            const fullRequest=new Request(request,{headers:fullHeaders});
+            const full=await telegramFileResponse(env,fileInfo.file_path,fullRequest);
+            if (!full.ok || full.status!==200 || !full.body) return;
+            const uploadedAt=Date.now();
+            await env.MEDIA_CACHE.put(cacheKey,full.body,{
+              httpMetadata:{contentType:indexed.mime_type||"application/octet-stream",contentDisposition:headers.get("Content-Disposition")||"inline",cacheControl:"private, no-store"},
+              customMetadata:{duration_ms:String(Math.max(0,Number(indexed.duration||0)*1000)),uploaded_at:String(uploadedAt),message_id:String(messageId),media_kind:String(kind)}
+            });
+            await listenerStub.prime(cacheKey,Math.max(0,Number(indexed.duration||0)*1000),uploadedAt);
+          }
+        } catch(error) {
+          console.warn("HJ R2 background fill failed",String(error?.message||error).slice(0,180));
+        } finally {
+          if(acquired) try{await listenerStub.releaseFill(cacheKey);}catch{}
+        }
+      })());
     }
 
-    if (!upstream.ok) {
-      return mediaError(
-        upstream.status || 502,
-        "TELEGRAM_FILE_DOWNLOAD_FAILED",
-        origin,
-        env,
-        "Telegram file delivery failed."
-      );
+    let upstream=await telegramFileResponse(env,fileInfo.file_path,request,range);
+    if(!upstream.ok){
+      try{
+        fileInfo=await botApiGetFile(env,indexed.file_id);
+        upstream=await telegramFileResponse(env,fileInfo.file_path,request,range);
+      }catch{}
     }
+    if(!upstream.ok) return mediaError(upstream.status||502,"TELEGRAM_FILE_DOWNLOAD_FAILED",origin,env,"Telegram file delivery failed.");
 
-    const upstreamHeaders = responseHeadersFromUpstream(upstream, headers);
-    if (range.requested && upstream.status === 200) {
+    const upstreamHeaders=responseHeadersFromUpstream(upstream,headers);
+    if(range.requested&&upstream.status===200){
       upstreamHeaders.delete("Content-Range");
-      upstreamHeaders.set("X-HJ-Telegram-Range", "upstream-did-not-honor-range");
-    } else {
-      upstreamHeaders.set("X-HJ-Telegram-Range", upstream.status === 206 ? "206" : "full");
+      upstreamHeaders.set("X-HJ-Telegram-Range","upstream-did-not-honor-range");
+    }else{
+      upstreamHeaders.set("X-HJ-Telegram-Range",upstream.status===206?"206":"full");
     }
 
-    if(env.MEDIA_CACHE&&upstream.status===200&&!range.requested&&upstream.body){try{const c=upstream.clone(),u=Date.now();ctx?.waitUntil(env.MEDIA_CACHE.put(cacheKey,c.body,{httpMetadata:{contentType:indexed.mime_type||"application/octet-stream",contentDisposition:upstreamHeaders.get("Content-Disposition")||"inline",cacheControl:"private, no-store"},customMetadata:{duration_ms:String(Math.max(0,Number(indexed.duration||0)*1000)),uploaded_at:String(u),message_id:String(messageId),media_kind:String(kind)}}).then(()=>mediaListenerStub(env,kind,messageId).prime(cacheKey,Math.max(0,Number(indexed.duration||0)*1000),u)).catch(e=>console.warn("HJ R2 cache write failed",String(e?.message||e).slice(0,180))));}catch(e){console.warn("HJ R2 cache tee failed",String(e?.message||e).slice(0,180));}}
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: upstreamHeaders,
-    });
-  } catch (error) {
-    console.error("HJ Bot API media error", {
-      kind,
-      messageId: Number(messageId),
-      error: String(error?.message || error).slice(0, 220),
-    });
-    return mediaError(502, "MEDIA_STREAM_ERROR", origin, env, error?.message || error);
+    // Full responses are cached as well, guarded by the same per-media lock.
+    if(env.MEDIA_CACHE&&upstream.status===200&&!range.requested&&upstream.body&&ctx){
+      ctx.waitUntil((async()=>{
+        let acquired=false;
+        try{
+          const lock=await listenerStub.acquireFill(cacheKey);
+          acquired=Boolean(lock?.acquired);
+          if(!acquired||await env.MEDIA_CACHE.head(cacheKey)) return;
+          const clone=upstream.clone();
+          const uploadedAt=Date.now();
+          await env.MEDIA_CACHE.put(cacheKey,clone.body,{
+            httpMetadata:{contentType:indexed.mime_type||"application/octet-stream",contentDisposition:upstreamHeaders.get("Content-Disposition")||"inline",cacheControl:"private, no-store"},
+            customMetadata:{duration_ms:String(Math.max(0,Number(indexed.duration||0)*1000)),uploaded_at:String(uploadedAt),message_id:String(messageId),media_kind:String(kind)}
+          });
+          await listenerStub.prime(cacheKey,Math.max(0,Number(indexed.duration||0)*1000),uploadedAt);
+        }catch(error){
+          console.warn("HJ R2 full-response cache write failed",String(error?.message||error).slice(0,180));
+        }finally{
+          if(acquired)try{await listenerStub.releaseFill(cacheKey);}catch{}
+        }
+      })());
+    }
+
+    return new Response(upstream.body,{status:upstream.status,headers:upstreamHeaders});
+  }catch(error){
+    console.error("HJ Bot API media error",{kind,messageId:Number(messageId),error:String(error?.message||error).slice(0,220)});
+    return mediaError(502,"MEDIA_STREAM_ERROR",origin,env,error?.message||error);
   }
 }
 
