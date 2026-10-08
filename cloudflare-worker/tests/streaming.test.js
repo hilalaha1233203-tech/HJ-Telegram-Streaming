@@ -283,7 +283,7 @@ async function fakeFetch(input, options = {}) {
 
     if (path.includes("/file/bot-test-bot-token/")) {
       state.calls.file += 1;
-      const marker = "/file/bot-test-bot-token/";
+      const marker = "/file/bottest-bot-token/";
       const filePath = path.slice(
         path.indexOf(marker) + marker.length
       );
