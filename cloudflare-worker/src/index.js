@@ -2326,8 +2326,18 @@ async function handleMedia(
       );
     }
 
+    const policyRow =
+      access.row ||
+      (
+        await lookupMediaPolicy(
+          env,
+          kind,
+          parsedMessageId
+        )
+      ).row;
+
     const contentId =
-      Number(access.row?.id) || 0;
+      Number(policyRow?.id) || 0;
 
     const chunkInfo =
       await getEpisodeChunks(
@@ -2350,7 +2360,7 @@ async function handleMedia(
         request,
         env,
         indexed,
-        access.row,
+        policyRow,
         chunkInfo,
         kind,
         parsedMessageId,
