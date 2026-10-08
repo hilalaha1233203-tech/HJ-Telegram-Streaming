@@ -36,7 +36,7 @@ jobs:
       - name: Containerless source guard
         run: |
           set -euo pipefail
-          ! grep -RInE 'from ["'\\'"]node:|require\(["'\\'"]node:|@cloudflare/containers|durable_objects|MediaListener' src wrangler.jsonc
+          ! grep -RInE 'node:|@cloudflare/containers|durable_objects|MediaListener' src wrangler.jsonc
 
       - name: Worker integration tests
         run: npm test
