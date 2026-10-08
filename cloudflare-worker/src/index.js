@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { DurableObject } from "cloudflare:workers";
 import {
   MEDIA_TICKET_TTL_MS,
   parseMessageId,
@@ -32,7 +33,7 @@ function applyCors(headers, origin, env) {
     headers.set("Access-Control-Allow-Origin", origin);
     headers.set("Vary", "Origin");
   }
-  headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
   headers.set(
     "Access-Control-Allow-Headers",
     "Authorization, Cache-Control, Content-Type, Pragma, Range"
@@ -357,9 +358,7 @@ async function botApiGetFile(env, fileId) {
 async function telegramFileResponse(env, filePath, request, range) {
   const token = envString(env, "TELEGRAM_BOT_TOKEN");
   const headers = new Headers();
-  if (range?.requested) {
-    headers.set("Range", "bytes=" + range.start + "-" + range.end);
-  }
+  if (range?.requested) headers.set("Range", "bytes=" + range.start + "-" + range.end);
   const response = await fetch(
     "https://api.telegram.org/file/bot" + token + "/" + filePath,
     { headers, redirect: "follow" }
@@ -422,7 +421,14 @@ function mediaError(status, code, origin, env, detail = "") {
   return jsonResponse(errorPayload(code, detail), status, origin, env);
 }
 
-async function handleMedia(request, env, kind, messageId) {
+const MEDIA_MAX_DURATION_MS=24*60*60*1000; const MEDIA_CACHE_GRACE_MS=15*60*1000; const MEDIA_LISTENER_LEASE_MS=45*1000;
+export class MediaListener extends DurableObject { constructor(ctx,env){super(ctx,env);ctx.blockConcurrencyWhile(async()=>{ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS listeners (session_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,last_seen INTEGER NOT NULL,lease_until INTEGER NOT NULL,ended_at INTEGER)");ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS media_state (cache_key TEXT PRIMARY KEY,base_expiry INTEGER NOT NULL,last_listener_end INTEGER NOT NULL DEFAULT 0)");});} async prime(cacheKey,durationMs,uploadedAt=Date.now()){const now=Date.now(),d=Math.min(MEDIA_MAX_DURATION_MS,Math.max(0,Number(durationMs)||0)),u=Number.isFinite(Number(uploadedAt))?Number(uploadedAt):now,base=u+d+MEDIA_CACHE_GRACE_MS;this.ctx.storage.sql.exec("INSERT INTO media_state (cache_key,base_expiry,last_listener_end) VALUES (?,?,0) ON CONFLICT(cache_key) DO UPDATE SET base_expiry=MAX(base_expiry,excluded.base_expiry)",String(cacheKey),base);await this.schedule();return {ok:true,baseExpiry:base};} async start(userId,durationMs,cacheKey,uploadedAt=Date.now()){const now=Date.now(),d=Math.min(MEDIA_MAX_DURATION_MS,Math.max(0,Number(durationMs)||0)),u=Number.isFinite(Number(uploadedAt))?Number(uploadedAt):now,base=u+d+MEDIA_CACHE_GRACE_MS;this.ctx.storage.sql.exec("INSERT INTO media_state (cache_key,base_expiry,last_listener_end) VALUES (?,?,0) ON CONFLICT(cache_key) DO UPDATE SET base_expiry=MAX(base_expiry,excluded.base_expiry)",String(cacheKey),base);const sessionId=crypto.randomUUID();this.ctx.storage.sql.exec("INSERT INTO listeners (session_id,user_id,last_seen,lease_until,ended_at) VALUES (?,?,?,?,NULL)",sessionId,String(userId),now,now+MEDIA_LISTENER_LEASE_MS);await this.schedule();return {sessionId,baseExpiry:base};} async heartbeat(sessionId){const now=Date.now(),r=this.ctx.storage.sql.exec("UPDATE listeners SET last_seen=?,lease_until=?,ended_at=NULL WHERE session_id=? AND ended_at IS NULL",now,now+MEDIA_LISTENER_LEASE_MS,String(sessionId));if(r.rowsWritten>0)await this.schedule();return {ok:r.rowsWritten>0};} async end(sessionId){const now=Date.now(),r=this.ctx.storage.sql.exec("UPDATE listeners SET ended_at=?,lease_until=? WHERE session_id=? AND ended_at IS NULL",now,now,String(sessionId));if(r.rowsWritten>0){this.ctx.storage.sql.exec("UPDATE media_state SET last_listener_end=MAX(last_listener_end,?)",now);await this.schedule();}return {ok:r.rowsWritten>0};} async alarm(){const now=Date.now();this.expireLeases(now);const s=this.ctx.storage.sql.exec("SELECT cache_key,base_expiry,last_listener_end FROM media_state LIMIT 1").one();if(!s?.cache_key){await this.ctx.storage.deleteAlarm();return;}const active=Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS active FROM listeners WHERE ended_at IS NULL AND lease_until>?",now).one()?.active||0);if(active>0){await this.schedule();return;}const deleteAt=Math.max(Number(s.base_expiry||0),Number(s.last_listener_end||0)+MEDIA_CACHE_GRACE_MS);if(now>=deleteAt){if(this.env.MEDIA_CACHE)await this.env.MEDIA_CACHE.delete(String(s.cache_key));this.ctx.storage.sql.exec("DELETE FROM listeners");this.ctx.storage.sql.exec("DELETE FROM media_state");await this.ctx.storage.deleteAlarm();return;}await this.ctx.storage.setAlarm(deleteAt);} expireLeases(now){const r=this.ctx.storage.sql.exec("UPDATE listeners SET ended_at=last_seen WHERE ended_at IS NULL AND lease_until<=?",now);if(r.rowsWritten>0){const row=this.ctx.storage.sql.exec("SELECT MAX(ended_at) AS last_end FROM listeners WHERE ended_at IS NOT NULL").one();if(Number(row?.last_end||0)>0)this.ctx.storage.sql.exec("UPDATE media_state SET last_listener_end=MAX(last_listener_end,?)",Number(row.last_end));}} async schedule(){const now=Date.now(),s=this.ctx.storage.sql.exec("SELECT base_expiry,last_listener_end FROM media_state LIMIT 1").one(),nl=Number(this.ctx.storage.sql.exec("SELECT MIN(lease_until) AS next_lease FROM listeners WHERE ended_at IS NULL").one()?.next_lease||0),da=Math.max(Number(s?.base_expiry||0),Number(s?.last_listener_end||0)+MEDIA_CACHE_GRACE_MS),next=nl>now?Math.min(nl,da||nl):da;await this.ctx.storage.setAlarm(next>now?next:now+1000);}}
+
+function mediaCacheKey(kind,indexed){return "media/"+String(kind)+"/"+String(indexed.telegram_message_id)+"/"+encodeURIComponent(String(indexed.file_id||"file"))+"-"+String(indexed.file_size||0);}
+function mediaListenerStub(env,kind,messageId){return env.MEDIA_LISTENER.getByName(String(kind)+":"+String(messageId));}
+async function listenerUser(request,env,kind,messageId){const t=String(new URL(request.url).searchParams.get("ticket")||"").trim(),tu=verifyMediaTicket(env,t,kind,messageId,request.headers.get("user-agent")||"");if(tu?.userId)return String(tu.userId);const a=String(request.headers.get("authorization")||"").trim(),u=await getSupabaseUser(env,a);if(u?.id)return String(u.id);const anon=String(new URL(request.url).searchParams.get("listenerId")||"").trim();return anon?("anon:"+anon):null;}
+async function handleListener(request,env,action){const origin=request.headers.get("origin")||"",url=new URL(request.url),kind=String(url.searchParams.get("kind")||"").toLowerCase(),messageId=parseMessageId(url.searchParams.get("messageId"));if(!["audio","video","document"].includes(kind)||!messageId)return mediaError(400,"INVALID_LISTENER_REQUEST",origin,env);const access=await inspectMediaAccess(env,request,kind,messageId);if(!access.ok)return mediaError(access.status||403,"MEDIA_ACCESS_DENIED",origin,env,access.error);const indexed=await getIndexedMedia(env,kind,messageId);if(!indexed)return mediaError(404,"MEDIA_INDEX_NOT_FOUND",origin,env);const userId=await listenerUser(request,env,kind,messageId);if(!userId)return mediaError(401,"LISTENER_AUTH_REQUIRED",origin,env);const stub=mediaListenerStub(env,kind,messageId),cacheKey=mediaCacheKey(kind,indexed);let result;if(action==="start"){const requestedDurationMs=Number(url.searchParams.get("durationMs")||0);const indexedDurationMs=Math.max(0,Number(indexed.duration||0)*1000);const effectiveDurationMs=Math.min(MEDIA_MAX_DURATION_MS,Math.max(0,Number.isFinite(requestedDurationMs)&&requestedDurationMs>0?requestedDurationMs:indexedDurationMs));let uploadedAt=Date.now();if(env.MEDIA_CACHE){try{const head=await env.MEDIA_CACHE.head(cacheKey);if(head?.uploaded)uploadedAt=head.uploaded.getTime();}catch{}}result=await stub.start(userId,effectiveDurationMs,cacheKey,uploadedAt);}else{const sid=String(url.searchParams.get("sessionId")||"").trim();if(!sid)return mediaError(400,"LISTENER_SESSION_REQUIRED",origin,env);result=action==="heartbeat"?await stub.heartbeat(sid):await stub.end(sid);}return jsonResponse(result,200,origin,env);}
+async function handleMedia(request, env, kind, messageId, ctx) {
   if (!parseMessageId(messageId)) {
     return mediaError(400, "INVALID_MESSAGE_ID", request.headers.get("origin") || "", env);
   }
@@ -449,316 +455,4 @@ async function handleMedia(request, env, kind, messageId) {
     const indexed = await getIndexedMedia(env, kind, Number(messageId));
     if (!indexed) return mediaError(404, "MEDIA_INDEX_NOT_FOUND", origin, env);
 
-    const size = Number(indexed.file_size);
-    if (!Number.isSafeInteger(size) || size <= 0) {
-      return mediaError(404, "MEDIA_INDEX_SIZE_MISSING", origin, env);
-    }
-
-    if (size > 20 * 1024 * 1024) {
-      return mediaError(
-        413,
-        "MEDIA_TOO_LARGE_FOR_BOT_API_STREAM",
-        origin,
-        env,
-        "Compress this Telegram media below 20 MB before website streaming."
-      );
-    }
-
-    const range = parseSingleRange(
-      request.headers.get("range"),
-      size,
-      1024 * 1024
-    );
-    if (range.error) {
-      const headers = new Headers({
-        "Content-Range": "bytes */" + size,
-        "Accept-Ranges": "bytes",
-      });
-      applyCors(headers, origin, env);
-      return new Response(null, { status: 416, headers });
-    }
-
-    const headers = mediaHeaders(indexed, kind, range, origin, env);
-    if (request.method === "HEAD") {
-      return new Response(null, {
-        status: range.requested ? 206 : 200,
-        headers,
-      });
-    }
-
-    let fileInfo;
-    try {
-      fileInfo = await botApiGetFile(env, indexed.file_id);
-    } catch (firstError) {
-      return mediaError(
-        Number(firstError.statusCode) === 400 ? 404 : 502,
-        "TELEGRAM_FILE_LOOKUP_FAILED",
-        origin,
-        env,
-        firstError.message
-      );
-    }
-
-    let upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
-    if (!upstream.ok) {
-      try {
-        fileInfo = await botApiGetFile(env, indexed.file_id);
-        upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
-      } catch {}
-    }
-
-    if (!upstream.ok) {
-      return mediaError(
-        upstream.status || 502,
-        "TELEGRAM_FILE_DOWNLOAD_FAILED",
-        origin,
-        env,
-        "Telegram file delivery failed."
-      );
-    }
-
-    const upstreamHeaders = responseHeadersFromUpstream(upstream, headers);
-    if (range.requested && upstream.status === 200) {
-      upstreamHeaders.delete("Content-Range");
-      upstreamHeaders.set("X-HJ-Telegram-Range", "upstream-did-not-honor-range");
-    } else {
-      upstreamHeaders.set("X-HJ-Telegram-Range", upstream.status === 206 ? "206" : "full");
-    }
-
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: upstreamHeaders,
-    });
-  } catch (error) {
-    console.error("HJ Bot API media error", {
-      kind,
-      messageId: Number(messageId),
-      error: String(error?.message || error).slice(0, 220),
-    });
-    return mediaError(502, "MEDIA_STREAM_ERROR", origin, env, error?.message || error);
-  }
-}
-
-async function handleMediaTicket(request, env) {
-  const url = new URL(request.url);
-  const type = String(url.pathname.split("/")[2] || "").toLowerCase();
-  const messageId = parseMessageId(url.pathname.split("/").pop());
-  if (!["audio", "video", "document"].includes(type) || !messageId) {
-    return jsonResponse({ error: "INVALID_MEDIA_TICKET_REQUEST" }, 400, request.headers.get("origin") || "", env);
-  }
-
-  try {
-    const access = await inspectMediaAccess(env, request, type, messageId);
-    if (!access.ok) {
-      return mediaError(access.status || 403, "MEDIA_ACCESS_DENIED", request.headers.get("origin") || "", env, access.error);
-    }
-    if (!access.row || !isProtectedPolicy(access.row)) {
-      return jsonResponse({ error: "Media is not protected" }, 400, request.headers.get("origin") || "", env);
-    }
-    const userId = String(access.user?.id || access.userId || "").trim();
-    if (!userId) {
-      return jsonResponse({ error: "Login is required for premium/VIP media." }, 401, request.headers.get("origin") || "", env);
-    }
-    const token = createMediaTicket(
-      env,
-      type,
-      messageId,
-      userId,
-      request.headers.get("user-agent") || ""
-    );
-    const mediaUrl =
-      new URL("/" + type + "/message/" + messageId, request.url).toString() +
-      "?ticket=" + encodeURIComponent(token);
-    const headers = new Headers({
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-    });
-    applyCors(headers, request.headers.get("origin") || "", env);
-    return new Response(
-      JSON.stringify({
-        url: mediaUrl,
-        expires_at: new Date(Date.now() + MEDIA_TICKET_TTL_MS).toISOString(),
-      }),
-      { status: 200, headers }
-    );
-  } catch (error) {
-    return jsonResponse({ error: "MEDIA_TICKET_ERROR" }, 503, request.headers.get("origin") || "", env);
-  }
-}
-
-async function handleTelegramMessages(request, env) {
-  const origin = request.headers.get("origin") || "";
-  const authHeader = request.headers.get("authorization") || "";
-  const user = await getSupabaseUser(env, authHeader);
-  if (user?.app_metadata?.role !== "admin") {
-    return jsonResponse(
-      { error: authHeader ? "FORBIDDEN" : "UNAUTHORIZED" },
-      authHeader ? 403 : 401,
-      origin,
-      env
-    );
-  }
-
-  const url = new URL(request.url);
-  const requestedLimit = Number(url.searchParams.get("limit"));
-  const limit = Number.isSafeInteger(requestedLimit)
-    ? Math.min(100, Math.max(1, requestedLimit))
-    : 100;
-  const requestedOffsetId = Number(url.searchParams.get("offset_id"));
-  const offsetId =
-    Number.isSafeInteger(requestedOffsetId) && requestedOffsetId > 0
-      ? requestedOffsetId
-      : 0;
-  const requestedType = String(url.searchParams.get("type") || "audio").toLowerCase();
-  const mediaType = ["audio", "video", "document"].includes(requestedType) ? requestedType : "audio";
-
-  try {
-    const params = new URLSearchParams({
-      select: "telegram_message_id,file_name,mime_type,file_size,duration,width,height,updated_at",
-      media_kind: "eq." + mediaType,
-      order: "telegram_message_id.desc",
-      limit: String(limit),
-    });
-    if (offsetId > 0) params.set("telegram_message_id", "lt." + String(offsetId));
-    const rows = await mediaIndexJson(
-      env,
-      "/rest/v1/telegram_media_index?" + params.toString()
-    );
-    const mediaMessages = Array.isArray(rows)
-      ? rows.map((row) => ({
-          messageId: Number(row.telegram_message_id),
-          fileName: row.file_name || (mediaType === "video" ? "video.mp4" : mediaType === "document" ? "book.pdf" : "audio.m4a"),
-          mimeType: row.mime_type || "",
-          size: Number(row.file_size || 0),
-          duration: Number(row.duration || 0),
-          width: Number(row.width || 0),
-          height: Number(row.height || 0),
-          date: row.updated_at || null,
-        }))
-      : [];
-
-    const nextOffsetId = mediaMessages.length >= limit
-      ? Number(mediaMessages[mediaMessages.length - 1]?.messageId || 0)
-      : 0;
-    const headers = new Headers();
-    applyCors(headers, origin, env);
-    headers.set("Cache-Control", "no-store");
-    headers.set("X-HJ-Telegram-Next-Offset", nextOffsetId ? String(nextOffsetId) : "");
-    headers.set("X-HJ-Telegram-Has-More", nextOffsetId ? "true" : "false");
-    headers.set("Content-Type", "application/json; charset=utf-8");
-
-    return new Response(JSON.stringify(mediaMessages), { status: 200, headers });
-  } catch (error) {
-    return jsonResponse(
-      {
-        error: "TELEGRAM_MESSAGES_ERROR",
-        detail: String(error?.message || error).replace(/[\r\n]+/g, " ").slice(0, 180),
-      },
-      503,
-      origin,
-      env
-    );
-  }
-}
-
-async function handleTelegramStatus(request, env) {
-  const missing = [];
-  for (const key of [
-    "TELEGRAM_BOT_TOKEN",
-    "SUPABASE_URL",
-    "SUPABASE_PUBLISHABLE_KEY",
-  ]) {
-    if (!envString(env, key)) missing.push(key);
-  }
-  if (!envString(env, "MEDIA_INDEX_SUPABASE_URL") && !envString(env, "SUPABASE_URL")) {
-    missing.push("MEDIA_INDEX_SUPABASE_URL");
-  }
-  if (
-    !envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") &&
-    !envString(env, "SUPABASE_SERVICE_ROLE_KEY")
-  ) {
-    missing.push("MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY");
-  }
-  if (!envString(env, "SUPABASE_SERVICE_ROLE_KEY") && !envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY")) {
-    missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  }
-  const hasMediaIndexUrl = Boolean(
-    envString(env, "MEDIA_INDEX_SUPABASE_URL") || envString(env, "SUPABASE_URL")
-  );
-  const hasMediaIndexKey = Boolean(
-    envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") ||
-    envString(env, "SUPABASE_SERVICE_ROLE_KEY")
-  );
-  if (!hasMediaIndexUrl) missing.push("MEDIA_INDEX_SUPABASE_URL");
-  if (!hasMediaIndexKey) missing.push("MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY");
-  const configured = missing.length === 0;
-  return jsonResponse(
-    {
-      ok: configured,
-      telegramConfigured: Boolean(envString(env, "TELEGRAM_BOT_TOKEN")),
-      botApiStreaming: true,
-      mediaIndexConfigured: hasMediaIndexUrl && hasMediaIndexKey,
-      missing,
-    },
-    configured ? 200 : 503,
-    request.headers.get("origin") || "",
-    env
-  );
-}
-
-export default {
-  async fetch(request, env) {
-    const origin = request.headers.get("origin") || "";
-    try {
-      const method = request.method.toUpperCase();
-      if (method === "OPTIONS") {
-        const headers = new Headers();
-        applyCors(headers, origin, env);
-        return new Response(null, { status: 204, headers });
-      }
-      if (method !== "GET" && method !== "HEAD") {
-        return jsonResponse({ error: "METHOD_NOT_ALLOWED" }, 405, origin, env);
-      }
-
-      const url = new URL(request.url);
-      const parts = url.pathname.split("/").filter(Boolean);
-
-      if (parts.length === 0 || url.pathname === "/health") {
-        return jsonResponse(
-          {
-            status: "ok",
-            service: "hj-telegram-streaming-cloudflare",
-            directTelegram: false,
-            botApiStreaming: true,
-          },
-          200,
-          origin,
-          env
-        );
-      }
-      if (url.pathname === "/telegram/status") return handleTelegramStatus(request, env);
-      if (url.pathname === "/telegram/messages") return handleTelegramMessages(request, env);
-
-      if (
-        parts.length === 4 &&
-        parts[0] === "media-ticket" &&
-        parts[2] === "message"
-      ) {
-        return handleMediaTicket(request, env);
-      }
-
-      if (
-        parts.length === 3 &&
-        ["audio", "video", "document"].includes(parts[0]) &&
-        parts[1] === "message"
-      ) {
-        return handleMedia(request, env, parts[0], parts[2]);
-      }
-
-      return jsonResponse({ error: "NOT_FOUND" }, 404, origin, env);
-    } catch (error) {
-      console.error("HJ Worker unhandled error", String(error?.message || error).slice(0, 200));
-      return jsonResponse({ error: "INTERNAL_SERVER_ERROR" }, 500, origin, env);
-    }
-  },
-};
+    const size = Number(indexed.file_size --- TRUNCATED --- 40,747 chars
