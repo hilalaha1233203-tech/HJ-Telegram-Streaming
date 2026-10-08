@@ -1,0 +1,28 @@
+{
+  "rules": [
+    {
+      "id": "Default Multipart Abort Rule",
+      "enabled": true,
+      "conditions": {},
+      "abortMultipartUploadsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 604800
+        }
+      }
+    },
+    {
+      "id": "Expire HJ Hot Media",
+      "enabled": true,
+      "conditions": {
+        "prefix": "media/"
+      },
+      "deleteObjectsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 600
+        }
+      }
+    }
+  ]
+}
