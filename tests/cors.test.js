@@ -37,34 +37,44 @@ test("local HJ web origin preflight is accepted without authentication", async (
     assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Authorization(,|$)/i);
 });
 
-test("production origin preflight is accepted without authentication", async () => {
-    const response = await fetch(baseUrl + "/telegram/messages", {
-        method: "OPTIONS",
-        headers: {
-            Origin: "https://hj-groups-website.getvoroa.com",
-            "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "authorization",
-        },
-    });
+test("production origins preflight is accepted without authentication", async () => {
+    for (const origin of [
+        "https://hj-groups-website.getvoroa.com",
+        "https://hj-groups-web.pages.dev",
+    ]) {
+        const response = await fetch(baseUrl + "/telegram/messages", {
+            method: "OPTIONS",
+            headers: {
+                Origin: origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        });
 
-    assert.equal(response.status, 204);
-    assert.equal(response.headers.get("access-control-allow-origin"), "https://hj-groups-website.getvoroa.com");
-    assert.match(response.headers.get("access-control-allow-methods") || "", /(^|,\s*)GET(,|$)/i);
-    assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Authorization(,|$)/i);
-    assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Cache-Control(,|$)/i);
-    assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Pragma(,|$)/i);
+        assert.equal(response.status, 204);
+        assert.equal(response.headers.get("access-control-allow-origin"), origin);
+        assert.match(response.headers.get("access-control-allow-methods") || "", /(^|,\s*)GET(,|$)/i);
+        assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Authorization(,|$)/i);
+        assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Cache-Control(,|$)/i);
+        assert.match(response.headers.get("access-control-allow-headers") || "", /(^|,\s*)Pragma(,|$)/i);
+    }
 });
 
-test("allowed origin is preserved on authenticated API error responses", async () => {
-    const response = await fetch(baseUrl + "/telegram/messages", {
-        headers: {
-            Origin: "https://hj-groups-website.getvoroa.com",
-            Authorization: "Bearer invalid-test-token",
-        },
-    });
+test("allowed production origins are preserved on authenticated API errors", async () => {
+    for (const origin of [
+        "https://hj-groups-website.getvoroa.com",
+        "https://hj-groups-web.pages.dev",
+    ]) {
+        const response = await fetch(baseUrl + "/telegram/messages", {
+            headers: {
+                Origin: origin,
+                Authorization: "Bearer invalid-test-token",
+            },
+        });
 
-    assert.equal(response.status, 401);
-    assert.equal(response.headers.get("access-control-allow-origin"), "https://hj-groups-website.getvoroa.com");
+        assert.equal(response.status, 401);
+        assert.equal(response.headers.get("access-control-allow-origin"), origin);
+    }
 });
 
 test("untrusted origins do not receive an allow-origin header", async () => {
