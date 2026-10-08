@@ -685,6 +685,21 @@ describe("Phase 3 Cloudflare streaming worker", () => {
     expect(state.calls.getFile).toBe(2);
   });
 
+  it("fails safely when a declared chunk cannot be fetched from Telegram", async () => {
+    const rows = await makeChunkRows(1);
+    rows[0].telegram_file_id = "missing-telegram-chunk";
+    state.chunks.set(1, rows);
+
+    const response = await request("/audio/message/101", {
+      headers: { Origin: ORIGIN },
+    });
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "TELEGRAM_CHUNK_DOWNLOAD_FAILED",
+    });
+    expect(state.calls.getFile).toBe(1);
+  });
+
   it("rejects malformed or missing chunk metadata instead of fetching an unsafe source", async () => {
     state.chunks.set(1, [
       {
