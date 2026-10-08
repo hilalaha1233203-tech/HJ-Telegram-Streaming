@@ -4,7 +4,7 @@ This directory contains the Cloudflare Worker used for the HJ GROUPS media gatew
 
 ## Runtime architecture
 
-`HJ web → Cloudflare Worker → Supabase media index → Telegram Bot API / R2 cache → browser`
+`HJ web → Cloudflare Worker → verified media mapping → R2 cache → Telegram Bot API on cache miss → browser`
 
 The original Node/MTProto server at repository root remains intact for rollback and for media that the Bot API path cannot safely serve.
 
@@ -19,7 +19,6 @@ The original Node/MTProto server at repository root remains intact for rollback 
 - `HEAD /document/message/:messageId`
 - `GET /media-ticket/:type/message/:messageId`
 - `GET /telegram/status`
-- listener lifecycle endpoints used by the player
 
 The Worker preserves HTTP range semantics and emits `206`, `Content-Range`, `Content-Length`, and `Accept-Ranges` for satisfiable single-range requests.
 
@@ -32,10 +31,18 @@ The current HJ production test file is around 23 MB. A real Message 7 test must 
 ## Cloudflare resources
 
 - Worker: `hj-telegram-streaming`
-- Durable Object: `MediaListener`
 - R2 bucket: `hj-groups-media`
 
-The Durable Object namespace and R2 bucket are existing production resources. Do not delete them during migration.
+R2 is a temporary hot cache only. The Worker does not use a Durable Object or listener/heartbeat coordinator.
+
+## Cache lifecycle
+
+- Object keys used for website media are under the `media/` prefix.
+- R2 is checked before any Telegram Bot API `getFile` call.
+- On an R2 MISS, the Worker resolves the already-verified Telegram source and streams it through the official Bot API path.
+- Successful full-object responses may be written back to R2 as temporary cache entries.
+- The R2 bucket has a lifecycle rule for `media/` objects with an age threshold of 600 seconds (10 minutes).
+- Cloudflare states lifecycle deletion is asynchronous: objects are typically removed within 24 hours after expiration, so 10 minutes is the eligibility/age threshold, **not an exact deletion timestamp**.
 
 ## Environment / secrets
 
@@ -91,3 +98,5 @@ A successful Worker deployment alone is not sufficient evidence of production re
 ## Rollback
 
 Rollback target is the existing Node/MTProto server and its current deployment. Do not remove that deployment until the Cloudflare path passes the real regression matrix.
+
+The official Telegram Bot API `getFile` download limit is 20 MB. Files above that source limit are **not** bypassed by this Worker. The agreed future handling is a separately-created, verified <=19 MB derivative/chunk set produced by GitHub Actions; originals remain untouched.
