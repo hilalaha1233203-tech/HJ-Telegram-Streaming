@@ -1068,6 +1068,15 @@ async function writeCacheAtomically(bucket, descriptor, body, expected) {
       expected
     );
     if (!tempValidation.ok) {
+      logEvent("r2_write_validation", {
+        phase: "temp",
+        kind: descriptor.kind,
+        messageId: descriptor.messageId,
+        chunkIndex: Number.isInteger(descriptor.idx) ? descriptor.idx : null,
+        expectedSize: expected.size,
+        actualSize: tempHead?.size ?? null,
+        reason: tempValidation.reason,
+      });
       throw new Error(
         "Temporary R2 cache validation failed: " +
         tempValidation.reason
