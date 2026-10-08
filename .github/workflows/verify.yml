@@ -84,5 +84,21 @@ jobs:
           }
           NODE
 
-      - name: Syntax check
+      - name: Syntax and Node compatibility checks
         run: npm test
+
+      - name: Cloudflare Worker integration tests
+        working-directory: cloudflare-worker
+        run: |
+          npm install --no-package-lock
+          npm test
+
+      - name: Cloudflare Worker dry run
+        working-directory: cloudflare-worker
+        run: npx wrangler@4.146.0 deploy --dry-run --outdir .wrangler-dry-run
+
+      - name: Cloudflare Worker containerless source guard
+        working-directory: cloudflare-worker
+        run: |
+          set -euo pipefail
+          ! grep -RInE 'node:|@cloudflare/containers|durable_objects|MediaListener' src wrangler.jsonc
