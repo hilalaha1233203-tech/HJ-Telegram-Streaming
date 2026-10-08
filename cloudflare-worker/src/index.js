@@ -624,7 +624,7 @@ function mediaCacheKey(kind, indexed, assembledSize) {
   );
 }
 
-async function handleMedia(request, env, kind, messageId, ctx) {{
+async function handleMedia(request, env, kind, messageId, ctx) {
   if (!parseMessageId(messageId)) {
     return mediaError(400, "INVALID_MESSAGE_ID", request.headers.get("origin") || "", env);
   }
