@@ -243,7 +243,10 @@ async function getEpisodeChunks(env, kind, contentId) {
           present: true,
           chunks: [],
           totalSize: 0,
-          error: new Error("Invalid episode_chunks row."),
+          error: Object.assign(
+            new Error("Invalid episode_chunks row."),
+            { code: "EPISODE_CHUNKS_INVALID" }
+          ),
         };
       }
       seen.add(chunk.idx);
@@ -2348,11 +2351,20 @@ async function handleMedia(
       );
 
     if (chunkInfo.error) {
+      const code =
+        chunkInfo.error?.code === "EPISODE_CHUNKS_INVALID"
+          ? "EPISODE_CHUNKS_INVALID"
+          : "EPISODE_CHUNKS_LOOKUP_FAILED";
+      const status =
+        chunkInfo.error?.code === "EPISODE_CHUNKS_INVALID"
+          ? 422
+          : 503;
       return mediaError(
-        503,
-        "EPISODE_CHUNKS_LOOKUP_FAILED",
+        status,
+        code,
         origin,
-        env
+        env,
+        chunkInfo.error?.message || ""
       );
     }
 
