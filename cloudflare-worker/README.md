@@ -4,7 +4,9 @@ This directory contains the Cloudflare Worker used for the HJ GROUPS media gatew
 
 ## Runtime architecture
 
-`HJ web → Cloudflare Worker → Supabase media index → Telegram Bot API / R2 cache → browser`
+`HJ web → Cloudflare Worker → Supabase media index → R2 cache → Telegram Bot API on cache miss → browser`
+
+R2 is checked before any Telegram file lookup. A per-media Durable Object coordinates background cache fills, while the same object tracks active listeners and cleanup.
 
 The original Node/MTProto server at repository root remains intact for rollback and for media that the Bot API path cannot safely serve.
 
@@ -36,6 +38,14 @@ The current HJ production test file is around 23 MB. A real Message 7 test must 
 - R2 bucket: `hj-groups-media`
 
 The Durable Object namespace and R2 bucket are existing production resources. Do not delete them during migration.
+
+### Cache lifecycle
+
+- R2 is the first media source on every media request.
+- On an R2 miss, Telegram Bot API is used only as the fallback source.
+- One `MediaListener` Durable Object is keyed per media item and provides the per-media R2 fill lock plus listener lifecycle state.
+- Cached media is eligible for deletion after the media's effective duration has elapsed and there have been no active listeners for **10 minutes**.
+- The cleanup is alarm-driven and does not require a separate cron worker.
 
 ## Environment / secrets
 
