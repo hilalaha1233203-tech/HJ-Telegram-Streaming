@@ -48,3 +48,7 @@ jobs:
             exit 0
           fi
           npx wrangler@4.146.0 deploy
+
+      - name: Apply temporary R2 media lifecycle
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: npx wrangler@4.146.0 r2 bucket lifecycle set hj-groups-media --file r2-lifecycle.json
