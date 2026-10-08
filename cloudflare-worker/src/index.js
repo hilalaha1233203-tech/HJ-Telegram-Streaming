@@ -357,7 +357,7 @@ function mediaHeaders(indexed, kind, range, requestOrigin, env) {
     "inline; filename=\"" + asciiName + "\"; filename*=UTF-8''" + encodeDispositionFilename(filename)
   );
   headers.set("Cache-Control", "private, no-store");
-  headers.set("ETag", "\"tg-" + kind + "-" + indexed.telegram_message_id + "-" + indexed.file_size + "\"");
+  headers.set("ETag", "\"tg-" + kind + "-" + (indexed.original_telegram_message_id || messageId) + "-" + indexed.file_size + "\"");
   headers.set("X-HJ-Telegram-Source", "bot-api");
   if (range.partial) {
     headers.set("Content-Range", "bytes " + range.start + "-" + range.end + "/" + indexed.file_size);
@@ -597,8 +597,7 @@ async function handleMedia(request, env, kind, messageId, ctx) {
                 cacheControl: "private, no-store",
               },
               customMetadata: {
-                original_original_message_id: String(messageId),
-              source_message_id: String(indexed.source_telegram_message_id || messageId),
+                original_message_id: String(messageId),
                 source_message_id: String(indexed.source_telegram_message_id || messageId),
                 media_kind: String(kind),
                 uploaded_at: String(Date.now()),
