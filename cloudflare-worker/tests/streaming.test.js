@@ -254,7 +254,12 @@ async function fakeFetch(input, options = {}) {
   if (url.origin === "https://api.telegram.org") {
     if (path.includes("/getFile")) {
       state.calls.getFile += 1;
-      const bodyText = await options.body?.text?.();
+      let bodyText = "";
+      if (typeof options.body === "string") {
+        bodyText = options.body;
+      } else if (options.body) {
+        bodyText = await new Response(options.body).text();
+      }
       const payload = bodyText ? JSON.parse(bodyText) : {};
       const file = state.fileMap.get(String(payload.file_id));
       if (!file) return json({ ok: false, description: "Bad Request: file not found" }, 400);
