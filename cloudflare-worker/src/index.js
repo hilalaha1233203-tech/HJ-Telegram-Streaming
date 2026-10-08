@@ -83,21 +83,6 @@ async function supabaseJson(env, pathname, key, authHeader = "", baseOverride = 
   return payload;
 }
 
-async function getIndexedMedia(env, kind, messageId) {
-  const params = new URLSearchParams({
-    select: "content_kind,content_id,source_group,part_index,part_count,original_telegram_message_id,source_telegram_message_id,media_kind,file_id,file_unique_id,file_name,mime_type,file_size,duration,width,height,updated_at",
-    original_telegram_message_id: "eq." + String(messageId),
-    media_kind: "eq." + String(kind),
-    limit: "1",
-  });
-  const rows = await supabaseJson(
-    env,
-    "/rest/v1/streaming_media_sources?" + params.toString(),
-    serverKey(env)
-  );
-  return Array.isArray(rows) ? rows[0] || null : null;
-}
-
 function parseAccessTypes(raw) {
   if (Array.isArray(raw)) {
     return raw.map(String).map((x) => x.trim().toLowerCase()).filter(Boolean);
@@ -963,27 +948,43 @@ async function handleTelegramMessages(request, env) {
       ? requestedOffsetId
       : 0;
   const requestedType = String(url.searchParams.get("type") || "audio").toLowerCase();
-  const mediaType = ["audio", "video", "document"].includes(requestedType) ? requestedType : "audio";
+  const mediaType = ["audio", "video", "document"].includes(requestedType)
+    ? requestedType
+    : "audio";
 
   try {
     const params = new URLSearchParams({
-      select: "telegram_message_id,file_name,mime_type,file_size,duration,width,height,updated_at",
+      select:
+        "original_telegram_message_id,source_telegram_message_id,file_name," +
+        "mime_type,file_size,assembled_file_size,duration,width,height,updated_at",
       media_kind: "eq." + mediaType,
-      order: "telegram_message_id.desc",
+      part_index: "eq.0",
+      order: "original_telegram_message_id.desc",
       limit: String(limit),
     });
-    if (offsetId > 0) params.set("telegram_message_id", "lt." + String(offsetId));
+    if (offsetId > 0) {
+      params.set("original_telegram_message_id", "lt." + String(offsetId));
+    }
+
     const rows = await supabaseJson(
       env,
       "/rest/v1/streaming_media_sources?" + params.toString(),
       serverKey(env)
     );
+
     const mediaMessages = Array.isArray(rows)
       ? rows.map((row) => ({
-          messageId: Number(row.telegram_message_id),
-          fileName: row.file_name || (mediaType === "video" ? "video.mp4" : mediaType === "document" ? "book.pdf" : "audio.m4a"),
+          messageId: Number(row.original_telegram_message_id),
+          sourceMessageId: Number(row.source_telegram_message_id),
+          fileName:
+            row.file_name ||
+            (mediaType === "video"
+              ? "video.mp4"
+              : mediaType === "document"
+                ? "book.pdf"
+                : "audio.m4a"),
           mimeType: row.mime_type || "",
-          size: Number(row.file_size || 0),
+          size: Number(row.assembled_file_size || row.file_size || 0),
           duration: Number(row.duration || 0),
           width: Number(row.width || 0),
           height: Number(row.height || 0),
@@ -991,22 +992,32 @@ async function handleTelegramMessages(request, env) {
         }))
       : [];
 
-    const nextOffsetId = mediaMessages.length >= limit
-      ? Number(mediaMessages[mediaMessages.length - 1]?.messageId || 0)
-      : 0;
+    const nextOffsetId =
+      mediaMessages.length >= limit
+        ? Number(mediaMessages[mediaMessages.length - 1]?.messageId || 0)
+        : 0;
+
     const headers = new Headers();
     applyCors(headers, origin, env);
     headers.set("Cache-Control", "no-store");
-    headers.set("X-HJ-Telegram-Next-Offset", nextOffsetId ? String(nextOffsetId) : "");
+    headers.set(
+      "X-HJ-Telegram-Next-Offset",
+      nextOffsetId ? String(nextOffsetId) : ""
+    );
     headers.set("X-HJ-Telegram-Has-More", nextOffsetId ? "true" : "false");
     headers.set("Content-Type", "application/json; charset=utf-8");
 
-    return new Response(JSON.stringify(mediaMessages), { status: 200, headers });
+    return new Response(JSON.stringify(mediaMessages), {
+      status: 200,
+      headers,
+    });
   } catch (error) {
     return jsonResponse(
       {
         error: "TELEGRAM_MESSAGES_ERROR",
-        detail: String(error?.message || error).replace(/[\r\n]+/g, " ").slice(0, 180),
+        detail: String(error?.message || error)
+          .replace(/[\r\n]+/g, " ")
+          .slice(0, 180),
       },
       503,
       origin,
