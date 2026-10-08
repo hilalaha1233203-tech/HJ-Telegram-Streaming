@@ -422,7 +422,7 @@ function mediaError(status, code, origin, env, detail = "") {
   return jsonResponse(errorPayload(code, detail), status, origin, env);
 }
 
-async function handleMedia(request, env, kind, messageId) {
+async function handleMedia(request, env, kind, messageId, ctx) {
   if (!parseMessageId(messageId)) {
     return mediaError(400, "INVALID_MESSAGE_ID", request.headers.get("origin") || "", env);
   }
@@ -441,7 +441,12 @@ async function handleMedia(request, env, kind, messageId) {
   const isPreview = Boolean(access.viaPreview);
   const isProtected = Boolean(access.viaTicket || isProtectedPolicy(access.row || {}));
   if (isProtected && !access.viaTicket && !isPreview) {
-    return mediaError(403, "SECURE_TICKET_REQUIRED", request.headers.get("origin") || "", env);
+    return mediaError(
+      403,
+      "SECURE_TICKET_REQUIRED",
+      request.headers.get("origin") || "",
+      env
+    );
   }
 
   const origin = request.headers.get("origin") || "";
@@ -486,6 +491,64 @@ async function handleMedia(request, env, kind, messageId) {
       });
     }
 
+    const cacheKey =
+      "media/" +
+      String(kind) +
+      "/" +
+      String(indexed.telegram_message_id) +
+      "/" +
+      encodeURIComponent(String(indexed.file_id || "file")) +
+      "-" +
+      String(indexed.file_size || 0);
+
+    // R2 is always the first media source. No Telegram API call is made on a cache hit.
+    if (env.MEDIA_CACHE) {
+      try {
+        const cached = await env.MEDIA_CACHE.get(cacheKey, {
+          range: request.headers,
+        });
+        if (cached?.body) {
+          const cachedHeaders = new Headers();
+          cached.writeHttpMetadata(cachedHeaders);
+          cachedHeaders.set("ETag", cached.httpEtag);
+          cachedHeaders.set("Accept-Ranges", "bytes");
+          cachedHeaders.set("X-HJ-Telegram-Source", "r2-cache");
+          applyCors(cachedHeaders, origin, env);
+
+          if (cached.range) {
+            const offset = Number(cached.range.offset || 0);
+            const length = Number(cached.range.length || cached.size);
+            cachedHeaders.set(
+              "Content-Range",
+              "bytes " +
+                offset +
+                "-" +
+                (offset + length - 1) +
+                "/" +
+                cached.size
+            );
+            cachedHeaders.set("Content-Length", String(length));
+            return new Response(cached.body, {
+              status: 206,
+              headers: cachedHeaders,
+            });
+          }
+
+          cachedHeaders.set("Content-Length", String(cached.size));
+          return new Response(cached.body, {
+            status: 200,
+            headers: cachedHeaders,
+          });
+        }
+      } catch (error) {
+        console.warn(
+          "HJ R2 cache read failed",
+          String(error?.message || error).slice(0, 180)
+        );
+      }
+    }
+
+    // R2 MISS only: resolve and fetch the verified Telegram Bot API source.
     let fileInfo;
     try {
       fileInfo = await botApiGetFile(env, indexed.file_id);
@@ -499,11 +562,21 @@ async function handleMedia(request, env, kind, messageId) {
       );
     }
 
-    let upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
+    let upstream = await telegramFileResponse(
+      env,
+      fileInfo.file_path,
+      request,
+      range
+    );
     if (!upstream.ok) {
       try {
         fileInfo = await botApiGetFile(env, indexed.file_id);
-        upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
+        upstream = await telegramFileResponse(
+          env,
+          fileInfo.file_path,
+          request,
+          range
+        );
       } catch {}
     }
 
@@ -520,9 +593,54 @@ async function handleMedia(request, env, kind, messageId) {
     const upstreamHeaders = responseHeadersFromUpstream(upstream, headers);
     if (range.requested && upstream.status === 200) {
       upstreamHeaders.delete("Content-Range");
-      upstreamHeaders.set("X-HJ-Telegram-Range", "upstream-did-not-honor-range");
+      upstreamHeaders.set(
+        "X-HJ-Telegram-Range",
+        "upstream-did-not-honor-range"
+      );
     } else {
-      upstreamHeaders.set("X-HJ-Telegram-Range", upstream.status === 206 ? "206" : "full");
+      upstreamHeaders.set(
+        "X-HJ-Telegram-Range",
+        upstream.status === 206 ? "206" : "full"
+      );
+    }
+
+    // Cache full responses only. Range requests remain directly streamed unless
+    // a later full request populates the temporary R2 hot cache.
+    if (
+      env.MEDIA_CACHE &&
+      ctx &&
+      upstream.status === 200 &&
+      !range.requested &&
+      upstream.body
+    ) {
+      ctx.waitUntil(
+        (async () => {
+          try {
+            if (await env.MEDIA_CACHE.head(cacheKey)) return;
+            const cacheBody = upstream.clone().body;
+            if (!cacheBody) return;
+            await env.MEDIA_CACHE.put(cacheKey, cacheBody, {
+              httpMetadata: {
+                contentType:
+                  indexed.mime_type || "application/octet-stream",
+                contentDisposition:
+                  upstreamHeaders.get("Content-Disposition") || "inline",
+                cacheControl: "private, no-store",
+              },
+              customMetadata: {
+                message_id: String(messageId),
+                media_kind: String(kind),
+                uploaded_at: String(Date.now()),
+              },
+            });
+          } catch (error) {
+            console.warn(
+              "HJ R2 cache write failed",
+              String(error?.message || error).slice(0, 180)
+            );
+          }
+        })()
+      );
     }
 
     return new Response(upstream.body, {
@@ -535,7 +653,13 @@ async function handleMedia(request, env, kind, messageId) {
       messageId: Number(messageId),
       error: String(error?.message || error).slice(0, 220),
     });
-    return mediaError(502, "MEDIA_STREAM_ERROR", origin, env, error?.message || error);
+    return mediaError(
+      502,
+      "MEDIA_STREAM_ERROR",
+      origin,
+      env,
+      error?.message || error
+    );
   }
 }
 
@@ -707,7 +831,7 @@ async function handleTelegramStatus(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("origin") || "";
     try {
       const method = request.method.toUpperCase();
@@ -752,7 +876,7 @@ export default {
         ["audio", "video", "document"].includes(parts[0]) &&
         parts[1] === "message"
       ) {
-        return handleMedia(request, env, parts[0], parts[2]);
+        return handleMedia(request, env, parts[0], parts[2], ctx);
       }
 
       return jsonResponse({ error: "NOT_FOUND" }, 404, origin, env);
