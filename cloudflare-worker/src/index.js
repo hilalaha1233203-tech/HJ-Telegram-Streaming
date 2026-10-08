@@ -85,8 +85,8 @@ async function supabaseJson(env, pathname, key, authHeader = "", baseOverride = 
 
 async function getIndexedMedia(env, kind, messageId) {
   const params = new URLSearchParams({
-    select: "content_kind,content_id,source_group,part_index,part_count,telegram_message_id,media_kind,file_id,file_unique_id,file_name,mime_type,file_size,duration,width,height,updated_at",
-    telegram_message_id: "eq." + String(messageId),
+    select: "content_kind,content_id,source_group,part_index,part_count,original_telegram_message_id,source_telegram_message_id,media_kind,file_id,file_unique_id,file_name,mime_type,file_size,duration,width,height,updated_at",
+    original_telegram_message_id: "eq." + String(messageId),
     media_kind: "eq." + String(kind),
     limit: "1",
   });
@@ -464,7 +464,7 @@ async function handleMedia(request, env, kind, messageId, ctx) {
       "media/" +
       String(kind) +
       "/" +
-      String(indexed.telegram_message_id) +
+      String(indexed.original_telegram_message_id || messageId) +
       "/" +
       encodeURIComponent(String(indexed.file_id || "file")) +
       "-" +
@@ -597,7 +597,9 @@ async function handleMedia(request, env, kind, messageId, ctx) {
                 cacheControl: "private, no-store",
               },
               customMetadata: {
-                message_id: String(messageId),
+                original_original_message_id: String(messageId),
+              source_message_id: String(indexed.source_telegram_message_id || messageId),
+                source_message_id: String(indexed.source_telegram_message_id || messageId),
                 media_kind: String(kind),
                 uploaded_at: String(Date.now()),
               },
