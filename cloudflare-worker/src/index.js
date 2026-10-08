@@ -1803,11 +1803,10 @@ async function serveWholeMedia(
     );
   }
 
-  const refreshedExpected =
-    buildExpectedMetadata({
-      ...expected,
-      sourceEtag: fetchResult.sourceEtag,
-    });
+  const refreshedExpected = {
+    ...expected,
+    sourceEtag: fetchResult.sourceEtag,
+  };
 
   const final = await bucket.head(
     descriptor.key
