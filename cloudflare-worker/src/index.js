@@ -963,11 +963,13 @@ function validateCacheObject(object, expected) {
   if (metadata.complete !== "1") {
     return { ok: false, reason: "incomplete" };
   }
-  if (object.size !== expected.size) {
+  const expectedSize = Number(expected.sourceSize);
+  if (!Number.isSafeInteger(expectedSize) || object.size !== expectedSize) {
     return {
       ok: false,
       reason: "size-mismatch",
       actual: object.size,
+      expected: expected.sourceSize,
     };
   }
   if (
@@ -1073,7 +1075,7 @@ async function writeCacheAtomically(bucket, descriptor, body, expected) {
         kind: descriptor.kind,
         messageId: descriptor.messageId,
         chunkIndex: Number.isInteger(descriptor.idx) ? descriptor.idx : null,
-        expectedSize: expected.size,
+        expectedSize: expected.sourceSize,
         actualSize: tempHead?.size ?? null,
         reason: tempValidation.reason,
       });
