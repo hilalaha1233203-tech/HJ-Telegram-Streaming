@@ -12,6 +12,7 @@ const FILE_NAME = "TEST.m4a";
 
 const DEFAULT_ALLOWED_ORIGINS = [
     "https://hj-groups-web.pages.dev",
+    "https://hj-groups-website.getvoroa.com",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ];
