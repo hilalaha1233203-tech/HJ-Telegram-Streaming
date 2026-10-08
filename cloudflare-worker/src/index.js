@@ -59,34 +59,6 @@ function serverKey(env) {
   return envString(env, "SUPABASE_SERVICE_ROLE_KEY");
 }
 
-function mediaIndexUrl(env) {
-  const value = envString(env, "MEDIA_INDEX_SUPABASE_URL") || envString(env, "SUPABASE_URL");
-  if (!value) throw new Error("Missing required environment variables: MEDIA_INDEX_SUPABASE_URL or SUPABASE_URL");
-  return value;
-}
-
-function mediaIndexKey(env) {
-  const value =
-    envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") ||
-    envString(env, "SUPABASE_SERVICE_ROLE_KEY");
-  if (!value) {
-    throw new Error(
-      "Missing required environment variables: MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY"
-    );
-  }
-  return value;
-}
-
-async function mediaIndexJson(env, pathname) {
-  return supabaseJson(
-    env,
-    pathname,
-    mediaIndexKey(env),
-    "",
-    mediaIndexUrl(env)
-  );
-}
-
 async function supabaseJson(env, pathname, key, authHeader = "", baseOverride = "") {
   const base = String(baseOverride || envString(env, "SUPABASE_URL")).trim();
   const headers = {
@@ -109,24 +81,6 @@ async function supabaseJson(env, pathname, key, authHeader = "", baseOverride = 
     throw error;
   }
   return payload;
-}
-
-async function getIndexedMedia(env, kind, messageId) {
-  const params = new URLSearchParams({
-    select: "storage_chat_id,telegram_message_id,media_kind,file_id,file_unique_id,file_name,mime_type,file_size,duration,width,height,updated_at",
-    telegram_message_id: "eq." + String(messageId),
-    media_kind: "eq." + String(kind),
-    limit: "1",
-  });
-  const storageChatId = Number(envString(env, "STORAGE_CHAT_ID"));
-  if (Number.isSafeInteger(storageChatId) && storageChatId !== 0) {
-    params.set("storage_chat_id", "eq." + String(storageChatId));
-  }
-  const rows = await mediaIndexJson(
-    env,
-    "/rest/v1/telegram_media_index?" + params.toString()
-  );
-  return Array.isArray(rows) ? rows[0] || null : null;
 }
 
 function parseAccessTypes(raw) {
@@ -367,7 +321,7 @@ async function telegramFileResponse(env, filePath, request, range) {
   return response;
 }
 
-function mediaHeaders(indexed, kind, range, requestOrigin, env) {
+function mediaHeaders(indexed, kind, range, requestOrigin, env, totalSize = Number(indexed.file_size)) {
   const headers = new Headers();
   const filename = String(indexed.file_name || inferFilename({ attributes: [] }, kind));
   const asciiName = safeAsciiFilename(
@@ -388,13 +342,13 @@ function mediaHeaders(indexed, kind, range, requestOrigin, env) {
     "inline; filename=\"" + asciiName + "\"; filename*=UTF-8''" + encodeDispositionFilename(filename)
   );
   headers.set("Cache-Control", "private, no-store");
-  headers.set("ETag", "\"tg-" + kind + "-" + indexed.telegram_message_id + "-" + indexed.file_size + "\"");
+  headers.set("ETag", "\"tg-" + kind + "-" + (indexed.original_telegram_message_id || "unknown") + "-" + totalSize + "\"");
   headers.set("X-HJ-Telegram-Source", "bot-api");
   if (range.partial) {
-    headers.set("Content-Range", "bytes " + range.start + "-" + range.end + "/" + indexed.file_size);
+    headers.set("Content-Range", "bytes " + range.start + "-" + range.end + "/" + totalSize);
     headers.set("Content-Length", String(range.length));
   } else {
-    headers.set("Content-Length", String(indexed.file_size));
+    headers.set("Content-Length", String(totalSize));
   }
   applyCors(headers, requestOrigin, env);
   return headers;
@@ -422,7 +376,255 @@ function mediaError(status, code, origin, env, detail = "") {
   return jsonResponse(errorPayload(code, detail), status, origin, env);
 }
 
-async function handleMedia(request, env, kind, messageId) {
+async function getIndexedMediaParts(env, kind, messageId) {
+  const params = new URLSearchParams({
+    select:
+      "content_kind,content_id,source_group,part_index,part_count," +
+      "original_telegram_message_id,source_telegram_message_id,media_kind," +
+      "file_id,file_unique_id,file_name,mime_type,file_size,assembled_file_size," +
+      "duration,width,height,verified_at,updated_at",
+    original_telegram_message_id: "eq." + String(messageId),
+    media_kind: "eq." + String(kind),
+    order: "part_index.asc",
+  });
+  const rows = await supabaseJson(
+    env,
+    "/rest/v1/streaming_media_sources?" + params.toString(),
+    serverKey(env)
+  );
+  return Array.isArray(rows) ? rows : [];
+}
+
+function validateMediaParts(parts, kind, messageId) {
+  if (!parts.length) {
+    return { ok: false, status: 404, error: "Media source mapping was not found." };
+  }
+
+  const expectedCount = Number(parts[0]?.part_count || 0);
+  if (!Number.isSafeInteger(expectedCount) || expectedCount < 1) {
+    return { ok: false, status: 500, error: "Media mapping has an invalid part count." };
+  }
+
+  if (expectedCount !== parts.length) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Media mapping is incomplete; not all verified parts are available.",
+    };
+  }
+
+  let assembledSize = Number(parts[0]?.assembled_file_size || 0);
+  let total = 0;
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (Number(part.part_count) !== expectedCount || Number(part.part_index) !== index) {
+      return { ok: false, status: 503, error: "Media mapping part order/count is invalid." };
+    }
+    if (
+      Number(part.original_telegram_message_id) !== Number(messageId) ||
+      String(part.media_kind) !== String(kind)
+    ) {
+      return { ok: false, status: 503, error: "Media mapping identity is inconsistent." };
+    }
+
+    const sourceMessageId = Number(part.source_telegram_message_id);
+    const fileSize = Number(part.file_size || 0);
+    const fileId = String(part.file_id || "").trim();
+    if (!Number.isSafeInteger(sourceMessageId) || sourceMessageId <= 0 || !fileId) {
+      return { ok: false, status: 503, error: "Media mapping contains an invalid Telegram source." };
+    }
+    if (!Number.isSafeInteger(fileSize) || fileSize <= 0 || fileSize > 19 * 1024 * 1024) {
+      return { ok: false, status: 503, error: "Media mapping contains an unsupported chunk size." };
+    }
+
+    if (index === 0 && (!Number.isSafeInteger(assembledSize) || assembledSize <= 0)) {
+      return { ok: false, status: 503, error: "Media mapping is missing the assembled file size." };
+    }
+
+    total += fileSize;
+  }
+
+  if (total !== assembledSize) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Media mapping chunk sizes do not equal the assembled file size.",
+    };
+  }
+
+  return { ok: true, assembledSize };
+}
+
+async function telegramPartResponse(env, part, localStart = null, localEnd = null) {
+  const fileInfo = await botApiGetFile(env, part.file_id);
+  const headers = new Headers();
+  const range = localStart != null && localEnd != null
+    ? {
+        start: Number(localStart),
+        end: Number(localEnd),
+        requested: true,
+      }
+    : {
+        start: 0,
+        end: Number(part.file_size) - 1,
+        requested: false,
+      };
+
+  return telegramFileResponse(env, fileInfo.file_path, new Request("https://worker.invalid/", {
+    method: "GET",
+    headers: range.requested
+      ? { Range: "bytes=" + range.start + "-" + range.end }
+      : {},
+  }), range);
+}
+
+async function sliceReadableBody(body, skipBytes, outputBytes) {
+  if (!body) throw new Error("Telegram response has no body.");
+  const reader = body.getReader();
+  let skip = Math.max(0, Number(skipBytes) || 0);
+  let remaining = Math.max(0, Number(outputBytes) || 0);
+
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        while (remaining > 0) {
+          const { done, value } = await reader.read();
+          if (done) {
+            throw new Error("Telegram response ended before the requested byte range was available.");
+          }
+          let chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+
+          if (skip > 0) {
+            const consume = Math.min(skip, chunk.byteLength);
+            skip -= consume;
+            chunk = chunk.subarray(consume);
+          }
+
+          if (!chunk.byteLength) continue;
+
+          const emit = Math.min(remaining, chunk.byteLength);
+          controller.enqueue(chunk.subarray(0, emit));
+          remaining -= emit;
+
+          if (emit < chunk.byteLength) {
+            break;
+          }
+        }
+
+        await reader.cancel().catch(() => {});
+        controller.close();
+      } catch (error) {
+        await reader.cancel().catch(() => {});
+        controller.error(error);
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {}
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
+function splitMediaStream(env, parts, range) {
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        let cursor = 0;
+
+        for (const part of parts) {
+          const partSize = Number(part.file_size);
+          const partStart = cursor;
+          const partEnd = cursor + partSize - 1;
+          cursor += partSize;
+
+          if (range.requested && (range.end < partStart || range.start > partEnd)) {
+            continue;
+          }
+
+          const overlapStart = range.requested
+            ? Math.max(range.start, partStart)
+            : partStart;
+          const overlapEnd = range.requested
+            ? Math.min(range.end, partEnd)
+            : partEnd;
+
+          const localStart = overlapStart - partStart;
+          const localLength = overlapEnd - overlapStart + 1;
+          const upstream = await telegramPartResponse(
+            env,
+            part,
+            range.requested ? localStart : null,
+            range.requested ? localStart + localLength - 1 : null
+          );
+
+          if (!upstream.ok) {
+            throw new Error(
+              "Telegram chunk " +
+                String(part.part_index) +
+                " download failed with HTTP " +
+                String(upstream.status)
+            );
+          }
+
+          if (range.requested && upstream.status === 206) {
+            const reader = upstream.body?.getReader();
+            if (!reader) throw new Error("Telegram chunk returned no body.");
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) controller.enqueue(value);
+              }
+            } finally {
+              reader.releaseLock();
+            }
+          } else {
+            const sliced = await sliceReadableBody(
+              upstream.body,
+              range.requested ? localStart : 0,
+              localLength
+            );
+            const reader = sliced.getReader();
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) controller.enqueue(value);
+              }
+            } finally {
+              reader.releaseLock();
+            }
+          }
+        }
+
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+  });
+}
+
+function mediaCacheKey(kind, indexed, assembledSize) {
+  return (
+    "media/" +
+    String(kind) +
+    "/" +
+    String(indexed.original_telegram_message_id) +
+    "/" +
+    encodeURIComponent(
+      String(indexed.source_group || indexed.source_telegram_message_id || indexed.file_id || "source")
+    ) +
+    "-" +
+    String(assembledSize)
+  );
+}
+
+async function handleMedia(request, env, kind, messageId, ctx) {
   if (!parseMessageId(messageId)) {
     return mediaError(400, "INVALID_MESSAGE_ID", request.headers.get("origin") || "", env);
   }
@@ -446,23 +648,20 @@ async function handleMedia(request, env, kind, messageId) {
 
   const origin = request.headers.get("origin") || "";
   try {
-    const indexed = await getIndexedMedia(env, kind, Number(messageId));
-    if (!indexed) return mediaError(404, "MEDIA_INDEX_NOT_FOUND", origin, env);
-
-    const size = Number(indexed.file_size);
-    if (!Number.isSafeInteger(size) || size <= 0) {
-      return mediaError(404, "MEDIA_INDEX_SIZE_MISSING", origin, env);
-    }
-
-    if (size > 20 * 1024 * 1024) {
+    const parts = await getIndexedMediaParts(env, kind, Number(messageId));
+    const validation = validateMediaParts(parts, kind, Number(messageId));
+    if (!validation.ok) {
       return mediaError(
-        413,
-        "MEDIA_TOO_LARGE_FOR_BOT_API_STREAM",
+        validation.status || 503,
+        "MEDIA_MAPPING_INVALID",
         origin,
         env,
-        "Compress this Telegram media below 20 MB before website streaming."
+        validation.error
       );
     }
+
+    const indexed = parts[0];
+    const size = validation.assembledSize;
 
     const range = parseSingleRange(
       request.headers.get("range"),
@@ -478,7 +677,7 @@ async function handleMedia(request, env, kind, messageId) {
       return new Response(null, { status: 416, headers });
     }
 
-    const headers = mediaHeaders(indexed, kind, range, origin, env);
+    const headers = mediaHeaders(indexed, kind, range, origin, env, size);
     if (request.method === "HEAD") {
       return new Response(null, {
         status: range.requested ? 206 : 200,
@@ -486,48 +685,182 @@ async function handleMedia(request, env, kind, messageId) {
       });
     }
 
-    let fileInfo;
-    try {
-      fileInfo = await botApiGetFile(env, indexed.file_id);
-    } catch (firstError) {
-      return mediaError(
-        Number(firstError.statusCode) === 400 ? 404 : 502,
-        "TELEGRAM_FILE_LOOKUP_FAILED",
-        origin,
-        env,
-        firstError.message
-      );
+    const cacheKey = mediaCacheKey(kind, indexed, size);
+
+    // R2 is the first media source. Telegram is contacted only after an R2 MISS.
+    if (env.MEDIA_CACHE) {
+      try {
+        const cached = await env.MEDIA_CACHE.get(cacheKey, {
+          range: request.headers,
+        });
+        if (cached?.body) {
+          const cachedHeaders = new Headers();
+          cached.writeHttpMetadata(cachedHeaders);
+          cachedHeaders.set("ETag", cached.httpEtag);
+          cachedHeaders.set("Accept-Ranges", "bytes");
+          cachedHeaders.set("X-HJ-Telegram-Source", "r2-cache");
+          applyCors(cachedHeaders, origin, env);
+
+          if (cached.range) {
+            const offset = Number(cached.range.offset || 0);
+            const length = Number(cached.range.length || cached.size);
+            cachedHeaders.set(
+              "Content-Range",
+              "bytes " +
+                offset +
+                "-" +
+                (offset + length - 1) +
+                "/" +
+                cached.size
+            );
+            cachedHeaders.set("Content-Length", String(length));
+            return new Response(cached.body, { status: 206, headers: cachedHeaders });
+          }
+
+          cachedHeaders.set("Content-Length", String(cached.size));
+          return new Response(cached.body, { status: 200, headers: cachedHeaders });
+        }
+      } catch (error) {
+        console.warn(
+          "HJ R2 cache read failed",
+          String(error?.message || error).slice(0, 180)
+        );
+      }
     }
 
-    let upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
-    if (!upstream.ok) {
+    if (parts.length === 1) {
+      let fileInfo;
       try {
         fileInfo = await botApiGetFile(env, indexed.file_id);
-        upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
-      } catch {}
+      } catch (firstError) {
+        return mediaError(
+          Number(firstError.statusCode) === 400 ? 404 : 502,
+          "TELEGRAM_FILE_LOOKUP_FAILED",
+          origin,
+          env,
+          firstError.message
+        );
+      }
+
+      let upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
+      if (!upstream.ok) {
+        try {
+          fileInfo = await botApiGetFile(env, indexed.file_id);
+          upstream = await telegramFileResponse(env, fileInfo.file_path, request, range);
+        } catch {}
+      }
+
+      if (!upstream.ok) {
+        return mediaError(
+          upstream.status || 502,
+          "TELEGRAM_FILE_DOWNLOAD_FAILED",
+          origin,
+          env,
+          "Telegram file delivery failed."
+        );
+      }
+
+      let responseBody = upstream.body;
+      let responseStatus = upstream.status;
+      let responseHeaders = responseHeadersFromUpstream(upstream, headers);
+      if (range.requested) {
+        responseStatus = 206;
+        responseHeaders.set("Content-Range", "bytes " + range.start + "-" + range.end + "/" + size);
+        responseHeaders.set("Content-Length", String(range.length));
+        responseHeaders.set(
+          "X-HJ-Telegram-Range",
+          upstream.status === 206 ? "206" : "sliced-from-200"
+        );
+        if (upstream.status === 200) {
+          responseBody = await sliceReadableBody(upstream.body, range.start, range.length);
+        }
+      } else {
+        responseHeaders.set("X-HJ-Telegram-Range", upstream.status === 206 ? "206" : "full");
+        responseStatus = upstream.status;
+      }
+
+      if (
+        env.MEDIA_CACHE &&
+        ctx &&
+        responseStatus === 200 &&
+        !range.requested &&
+        upstream.body
+      ) {
+        ctx.waitUntil(
+          (async () => {
+            try {
+              if (await env.MEDIA_CACHE.head(cacheKey)) return;
+              const cacheBody = upstream.clone().body;
+              if (!cacheBody) return;
+              await env.MEDIA_CACHE.put(cacheKey, cacheBody, {
+                httpMetadata: {
+                  contentType: indexed.mime_type || "application/octet-stream",
+                  contentDisposition: responseHeaders.get("Content-Disposition") || "inline",
+                  cacheControl: "private, no-store",
+                },
+                customMetadata: {
+                  original_message_id: String(messageId),
+                  source_message_id: String(indexed.source_telegram_message_id || messageId),
+                  media_kind: String(kind),
+                  uploaded_at: String(Date.now()),
+                },
+              });
+            } catch (error) {
+              console.warn(
+                "HJ R2 cache write failed",
+                String(error?.message || error).slice(0, 180)
+              );
+            }
+          })()
+        );
+      }
+
+      return new Response(responseBody, {
+        status: responseStatus,
+        headers: responseHeaders,
+      });
     }
 
-    if (!upstream.ok) {
-      return mediaError(
-        upstream.status || 502,
-        "TELEGRAM_FILE_DOWNLOAD_FAILED",
-        origin,
-        env,
-        "Telegram file delivery failed."
+    // Multi-part source: stream the verified Telegram chunks in order and expose
+    // the concatenated bytes as the original file. No source file is rewritten.
+    const assembledStream = splitMediaStream(env, parts, range);
+    let responseBody = assembledStream;
+    let responseStatus = range.requested ? 206 : 200;
+
+    if (env.MEDIA_CACHE && ctx && !range.requested) {
+      const [clientStream, cacheStream] = assembledStream.tee();
+      responseBody = clientStream;
+      ctx.waitUntil(
+        (async () => {
+          try {
+            if (await env.MEDIA_CACHE.head(cacheKey)) return;
+            await env.MEDIA_CACHE.put(cacheKey, cacheStream, {
+              httpMetadata: {
+                contentType: indexed.mime_type || "application/octet-stream",
+                contentDisposition: headers.get("Content-Disposition") || "inline",
+                cacheControl: "private, no-store",
+              },
+              customMetadata: {
+                original_message_id: String(messageId),
+                source_group: String(indexed.source_group || ""),
+                part_count: String(parts.length),
+                media_kind: String(kind),
+                uploaded_at: String(Date.now()),
+              },
+            });
+          } catch (error) {
+            console.warn(
+              "HJ R2 assembled cache write failed",
+              String(error?.message || error).slice(0, 180)
+            );
+          }
+        })()
       );
     }
 
-    const upstreamHeaders = responseHeadersFromUpstream(upstream, headers);
-    if (range.requested && upstream.status === 200) {
-      upstreamHeaders.delete("Content-Range");
-      upstreamHeaders.set("X-HJ-Telegram-Range", "upstream-did-not-honor-range");
-    } else {
-      upstreamHeaders.set("X-HJ-Telegram-Range", upstream.status === 206 ? "206" : "full");
-    }
-
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: upstreamHeaders,
+    return new Response(responseBody, {
+      status: responseStatus,
+      headers,
     });
   } catch (error) {
     console.error("HJ Bot API media error", {
@@ -535,10 +868,15 @@ async function handleMedia(request, env, kind, messageId) {
       messageId: Number(messageId),
       error: String(error?.message || error).slice(0, 220),
     });
-    return mediaError(502, "MEDIA_STREAM_ERROR", origin, env, error?.message || error);
+    return mediaError(
+      502,
+      "MEDIA_STREAM_ERROR",
+      origin,
+      env,
+      error?.message || error
+    );
   }
 }
-
 async function handleMediaTicket(request, env) {
   const url = new URL(request.url);
   const type = String(url.pathname.split("/")[2] || "").toLowerCase();
@@ -610,26 +948,43 @@ async function handleTelegramMessages(request, env) {
       ? requestedOffsetId
       : 0;
   const requestedType = String(url.searchParams.get("type") || "audio").toLowerCase();
-  const mediaType = ["audio", "video", "document"].includes(requestedType) ? requestedType : "audio";
+  const mediaType = ["audio", "video", "document"].includes(requestedType)
+    ? requestedType
+    : "audio";
 
   try {
     const params = new URLSearchParams({
-      select: "telegram_message_id,file_name,mime_type,file_size,duration,width,height,updated_at",
+      select:
+        "original_telegram_message_id,source_telegram_message_id,file_name," +
+        "mime_type,file_size,assembled_file_size,duration,width,height,updated_at",
       media_kind: "eq." + mediaType,
-      order: "telegram_message_id.desc",
+      part_index: "eq.0",
+      order: "original_telegram_message_id.desc",
       limit: String(limit),
     });
-    if (offsetId > 0) params.set("telegram_message_id", "lt." + String(offsetId));
-    const rows = await mediaIndexJson(
+    if (offsetId > 0) {
+      params.set("original_telegram_message_id", "lt." + String(offsetId));
+    }
+
+    const rows = await supabaseJson(
       env,
-      "/rest/v1/telegram_media_index?" + params.toString()
+      "/rest/v1/streaming_media_sources?" + params.toString(),
+      serverKey(env)
     );
+
     const mediaMessages = Array.isArray(rows)
       ? rows.map((row) => ({
-          messageId: Number(row.telegram_message_id),
-          fileName: row.file_name || (mediaType === "video" ? "video.mp4" : mediaType === "document" ? "book.pdf" : "audio.m4a"),
+          messageId: Number(row.original_telegram_message_id),
+          sourceMessageId: Number(row.source_telegram_message_id),
+          fileName:
+            row.file_name ||
+            (mediaType === "video"
+              ? "video.mp4"
+              : mediaType === "document"
+                ? "book.pdf"
+                : "audio.m4a"),
           mimeType: row.mime_type || "",
-          size: Number(row.file_size || 0),
+          size: Number(row.assembled_file_size || row.file_size || 0),
           duration: Number(row.duration || 0),
           width: Number(row.width || 0),
           height: Number(row.height || 0),
@@ -637,22 +992,32 @@ async function handleTelegramMessages(request, env) {
         }))
       : [];
 
-    const nextOffsetId = mediaMessages.length >= limit
-      ? Number(mediaMessages[mediaMessages.length - 1]?.messageId || 0)
-      : 0;
+    const nextOffsetId =
+      mediaMessages.length >= limit
+        ? Number(mediaMessages[mediaMessages.length - 1]?.messageId || 0)
+        : 0;
+
     const headers = new Headers();
     applyCors(headers, origin, env);
     headers.set("Cache-Control", "no-store");
-    headers.set("X-HJ-Telegram-Next-Offset", nextOffsetId ? String(nextOffsetId) : "");
+    headers.set(
+      "X-HJ-Telegram-Next-Offset",
+      nextOffsetId ? String(nextOffsetId) : ""
+    );
     headers.set("X-HJ-Telegram-Has-More", nextOffsetId ? "true" : "false");
     headers.set("Content-Type", "application/json; charset=utf-8");
 
-    return new Response(JSON.stringify(mediaMessages), { status: 200, headers });
+    return new Response(JSON.stringify(mediaMessages), {
+      status: 200,
+      headers,
+    });
   } catch (error) {
     return jsonResponse(
       {
         error: "TELEGRAM_MESSAGES_ERROR",
-        detail: String(error?.message || error).replace(/[\r\n]+/g, " ").slice(0, 180),
+        detail: String(error?.message || error)
+          .replace(/[\r\n]+/g, " ")
+          .slice(0, 180),
       },
       503,
       origin,
@@ -662,42 +1027,20 @@ async function handleTelegramMessages(request, env) {
 }
 
 async function handleTelegramStatus(request, env) {
-  const missing = [];
-  for (const key of [
+  const requiredKeys = [
     "TELEGRAM_BOT_TOKEN",
     "SUPABASE_URL",
     "SUPABASE_PUBLISHABLE_KEY",
-  ]) {
-    if (!envString(env, key)) missing.push(key);
-  }
-  if (!envString(env, "MEDIA_INDEX_SUPABASE_URL") && !envString(env, "SUPABASE_URL")) {
-    missing.push("MEDIA_INDEX_SUPABASE_URL");
-  }
-  if (
-    !envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") &&
-    !envString(env, "SUPABASE_SERVICE_ROLE_KEY")
-  ) {
-    missing.push("MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY");
-  }
-  if (!envString(env, "SUPABASE_SERVICE_ROLE_KEY") && !envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY")) {
-    missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  }
-  const hasMediaIndexUrl = Boolean(
-    envString(env, "MEDIA_INDEX_SUPABASE_URL") || envString(env, "SUPABASE_URL")
-  );
-  const hasMediaIndexKey = Boolean(
-    envString(env, "MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY") ||
-    envString(env, "SUPABASE_SERVICE_ROLE_KEY")
-  );
-  if (!hasMediaIndexUrl) missing.push("MEDIA_INDEX_SUPABASE_URL");
-  if (!hasMediaIndexKey) missing.push("MEDIA_INDEX_SUPABASE_SERVICE_ROLE_KEY");
+    "SUPABASE_SERVICE_ROLE_KEY",
+  ];
+  const missing = requiredKeys.filter((key) => !envString(env, key));
   const configured = missing.length === 0;
   return jsonResponse(
     {
       ok: configured,
       telegramConfigured: Boolean(envString(env, "TELEGRAM_BOT_TOKEN")),
       botApiStreaming: true,
-      mediaIndexConfigured: hasMediaIndexUrl && hasMediaIndexKey,
+      streamingMediaMappingConfigured: configured,
       missing,
     },
     configured ? 200 : 503,
@@ -707,7 +1050,7 @@ async function handleTelegramStatus(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("origin") || "";
     try {
       const method = request.method.toUpperCase();
@@ -752,7 +1095,7 @@ export default {
         ["audio", "video", "document"].includes(parts[0]) &&
         parts[1] === "message"
       ) {
-        return handleMedia(request, env, parts[0], parts[2]);
+        return handleMedia(request, env, parts[0], parts[2], ctx);
       }
 
       return jsonResponse({ error: "NOT_FOUND" }, 404, origin, env);
