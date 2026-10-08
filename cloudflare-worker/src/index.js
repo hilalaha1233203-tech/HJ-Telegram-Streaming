@@ -321,7 +321,7 @@ async function telegramFileResponse(env, filePath, request, range) {
   return response;
 }
 
-function mediaHeaders(indexed, kind, range, requestOrigin, env) {
+function mediaHeaders(indexed, kind, range, requestOrigin, env, totalSize = Number(indexed.file_size)) {
   const headers = new Headers();
   const filename = String(indexed.file_name || inferFilename({ attributes: [] }, kind));
   const asciiName = safeAsciiFilename(
@@ -342,13 +342,13 @@ function mediaHeaders(indexed, kind, range, requestOrigin, env) {
     "inline; filename=\"" + asciiName + "\"; filename*=UTF-8''" + encodeDispositionFilename(filename)
   );
   headers.set("Cache-Control", "private, no-store");
-  headers.set("ETag", "\"tg-" + kind + "-" + (indexed.original_telegram_message_id || messageId) + "-" + indexed.file_size + "\"");
+  headers.set("ETag", "\"tg-" + kind + "-" + (indexed.original_telegram_message_id || "unknown") + "-" + totalSize + "\"");
   headers.set("X-HJ-Telegram-Source", "bot-api");
   if (range.partial) {
-    headers.set("Content-Range", "bytes " + range.start + "-" + range.end + "/" + indexed.file_size);
+    headers.set("Content-Range", "bytes " + range.start + "-" + range.end + "/" + totalSize);
     headers.set("Content-Length", String(range.length));
   } else {
-    headers.set("Content-Length", String(indexed.file_size));
+    headers.set("Content-Length", String(totalSize));
   }
   applyCors(headers, requestOrigin, env);
   return headers;
@@ -677,7 +677,7 @@ async function handleMedia(request, env, kind, messageId, ctx) {
       return new Response(null, { status: 416, headers });
     }
 
-    const headers = mediaHeaders(indexed, kind, range, origin, env);
+    const headers = mediaHeaders(indexed, kind, range, origin, env, size);
     if (request.method === "HEAD") {
       return new Response(null, {
         status: range.requested ? 206 : 200,
