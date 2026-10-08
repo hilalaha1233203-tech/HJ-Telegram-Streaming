@@ -86,3 +86,29 @@ jobs:
 
       - name: Syntax check
         run: npm test
+
+
+  verify-cloudflare-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-worker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cloudflare-worker/package.json
+
+      - name: Install Worker dependencies
+        run: npm install --no-package-lock
+
+      - name: Worker syntax tests
+        run: npm test
+
+      - name: Worker dry run
+        run: npm run dry-run
