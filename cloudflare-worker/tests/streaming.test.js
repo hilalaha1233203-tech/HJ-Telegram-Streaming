@@ -144,11 +144,12 @@ async function sha256Hex(value) {
 }
 
 async function makeChunkRows(episodeId) {
-  const rows = CHUNKS[episodeId].map((row) => ({
-    ...row,
-    sha256: await sha256Hex(row.value),
-  }));
-  return rows;
+  return Promise.all(
+    CHUNKS[episodeId].map(async (row) => ({
+      ...row,
+      sha256: await sha256Hex(row.value),
+    }))
+  );
 }
 
 function resetState() {
