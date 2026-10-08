@@ -30,13 +30,18 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install
+      - name: Install Worker dependencies
         run: npm install --no-package-lock
 
-      - name: Test
+      - name: Containerless source guard
+        run: |
+          set -euo pipefail
+          ! grep -RInE 'from ["'\\'"]node:|require\(["'\\'"]node:|@cloudflare/containers|durable_objects|MediaListener' src wrangler.jsonc
+
+      - name: Worker integration tests
         run: npm test
 
-      - name: Dry run
+      - name: Wrangler dry run
         run: npx wrangler@4.146.0 deploy --dry-run --outdir .wrangler-dry-run
 
       - name: Deploy when Cloudflare token is configured
