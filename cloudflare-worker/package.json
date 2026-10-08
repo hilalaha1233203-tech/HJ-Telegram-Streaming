@@ -9,7 +9,7 @@
     "dry-run": "wrangler deploy --dry-run --outdir .wrangler-dry-run"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.15.0",
+    "@cloudflare/vitest-plugin": "^1.3.7",
     "vitest": "^4.1.0",
     "wrangler": "4.146.0"
   }
